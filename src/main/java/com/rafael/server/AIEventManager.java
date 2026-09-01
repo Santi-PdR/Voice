@@ -66,7 +66,7 @@ public class AIEventManager {
         if (event.getEntity() instanceof ServerPlayer player) {
             String deathMessage = event.getSource().getLocalizedDeathMessage(player).getString();
             String fallback = "Alerta crítica. Baja confirmada. Causa registrada: " + deathMessage + ".";
-            triggerAIEvent(player, "Muerte de Jugador", deathMessage, fallback, true);
+            triggerAIEvent(player, "Muerte de Jugador", deathMessage, fallback, true, 0.0f);
         }
     }
 
@@ -123,7 +123,7 @@ public class AIEventManager {
         if (healthBefore > 4.0f && healthAfter <= 4.0f && healthAfter > 0.0f) {
             String detail = String.format(Locale.ROOT, "Salud estimada tras daño: %.1f/20", healthAfter);
             String fallback = "Advertencia. Umbral vital crítico detectado: " + String.format(Locale.ROOT, "%.1f", healthAfter) + " puntos. Retirada o curación inmediata recomendada.";
-            triggerAIEvent(player, "Salud Crítica", detail, fallback, false);
+            triggerAIEvent(player, "Salud Crítica", detail, fallback, false, healthAfter);
         }
     }
 
@@ -152,13 +152,18 @@ public class AIEventManager {
     }
 
     public static void triggerAIEvent(ServerPlayer player, String eventType, String detail, String fallbackText, boolean bypassCooldown) {
+        float snapshotHealth = player == null ? 0.0f : player.getHealth();
+        triggerAIEvent(player, eventType, detail, fallbackText, bypassCooldown, snapshotHealth);
+    }
+
+    private static void triggerAIEvent(ServerPlayer player, String eventType, String detail, String fallbackText, boolean bypassCooldown, float snapshotHealth) {
         if (player == null || player.getServer() == null) return;
         if (!bypassCooldown && !acquireCooldown(player.getUUID(), eventType)) return;
         MinecraftServer server = player.getServer();
         UUID playerId = player.getUUID();
         RafaelService.EventSnapshot snapshot = new RafaelService.EventSnapshot(
                 player.getName().getString(), eventType, detail == null ? "" : detail,
-                fallbackText == null ? "" : fallbackText, player.getHealth(),
+                fallbackText == null ? "" : fallbackText, Math.max(0.0f, snapshotHealth),
                 player.level().dimension().location().toString());
 
         RafaelService.requestSpeech(snapshot, result -> server.execute(() -> {
