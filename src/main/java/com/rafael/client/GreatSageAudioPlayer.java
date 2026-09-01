@@ -6,25 +6,29 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 
+import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioInputStream;
 import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.Clip;
 import javax.sound.sampled.FloatControl;
+import javax.sound.sampled.LineEvent;
 import java.io.BufferedInputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class GreatSageAudioPlayer {
 
+    private static final Set<Clip> ACTIVE_CLIPS = ConcurrentHashMap.newKeySet();
+
     public static void playVoice(String audioUrl) {
         Minecraft minecraft = Minecraft.getInstance();
-        double rawVolume = GreatSageClientConfig.CLIENT.voiceVolume.get();
-        float volume = (float) rawVolume;
+        float volume = (float) GreatSageClientConfig.CLIENT.voiceVolume.get().doubleValue();
         if (volume <= 0f) return;
 
-        // Efecto de sonido arcano/mágico inmersivo inmediato de activación del Gran Sabio
         minecraft.execute(() -> {
             if (minecraft.player != null && minecraft.player.level() != null) {
                 minecraft.player.level().playSound(
@@ -38,44 +42,106 @@ public class GreatSageAudioPlayer {
             }
         });
 
-        // Si hay una URL de audio provista por el servidor de IA, reproducirla de forma asíncrona
-        if (audioUrl != null && !audioUrl.isEmpty()) {
-            CompletableFuture.runAsync(() -> {
-                try {
-                    URL url = new URL(audioUrl);
-                    HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-                    connection.setRequestMethod("GET");
-                    connection.setConnectTimeout(5000);
-                    connection.setReadTimeout(5000);
+        if (audioUrl == null || audioUrl.isBlank()) {
+            GreatSageMod.LOGGER.debug("Rafael recibió un paquete sin audio_url; se reproduce solo el efecto local.");
+            return;
+        }
 
-                    try (InputStream inputStream = connection.getInputStream();
-                         BufferedInputStream bufferedInputStream = new BufferedInputStream(inputStream);
-                         AudioInputStream audioInputStream = AudioSystem.getAudioInputStream(bufferedInputStream)) {
+        CompletableFuture.runAsync(() -> streamAndPlay(audioUrl, volume));
+    }
 
-                        Clip clip = AudioSystem.getClip();
-                        clip.open(audioInputStream);
-                        
-                        // Ajustar volumen del clip si soporta control de ganancia
-                        try {
-                            FloatControl gainControl = (FloatControl) clip.getControl(FloatControl.Type.MASTER_GAIN);
-                            float dB = (float) (20.0 * Math.log10(Math.max(0.0001, volume)));
-                            gainControl.setValue(Math.max(gainControl.getMinimum(), Math.min(gainControl.getMaximum(), dB)));
-                        } catch (Exception ignored) {}
+    private static void streamAndPlay(String audioUrl, float volume) {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(audioUrl);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("Accept", "audio/wav,audio/x-wav,application/octet-stream;q=0.8,*/*;q=0.1");
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(15000);
 
-                        clip.start();
-                        GreatSageMod.LOGGER.info("Reproduciendo voz de Rafael desde el servidor de IA.");
-                    }
-                } catch (Exception e) {
-                    GreatSageMod.LOGGER.debug("Audio URL no accesible ({}), usando efectos de sistema local.", audioUrl);
+            int responseCode = connection.getResponseCode();
+            if (responseCode < 200 || responseCode >= 300) {
+                throw new IllegalStateException("HTTP " + responseCode + " al descargar la voz");
+            }
+
+            try (InputStream inputStream = connection.getInputStream();
+                 BufferedInputStream bufferedInputStream = new BufferedInputStream(inputStream);
+                 AudioInputStream sourceStream = AudioSystem.getAudioInputStream(bufferedInputStream)) {
+
+                AudioFormat sourceFormat = sourceStream.getFormat();
+                AudioInputStream playableStream = sourceStream;
+                AudioFormat targetFormat = new AudioFormat(
+                        AudioFormat.Encoding.PCM_SIGNED,
+                        sourceFormat.getSampleRate(),
+                        16,
+                        sourceFormat.getChannels(),
+                        sourceFormat.getChannels() * 2,
+                        sourceFormat.getSampleRate(),
+                        false
+                );
+
+                if (!isClipFriendly(sourceFormat) && AudioSystem.isConversionSupported(targetFormat, sourceFormat)) {
+                    playableStream = AudioSystem.getAudioInputStream(targetFormat, sourceStream);
+                    GreatSageMod.LOGGER.info("Convirtiendo audio de Rafael en cliente: {} -> {}", sourceFormat, targetFormat);
                 }
-            });
+
+                Clip clip = AudioSystem.getClip();
+                clip.open(playableStream);
+                configureVolume(clip, volume);
+
+                ACTIVE_CLIPS.add(clip);
+                clip.addLineListener(event -> {
+                    if (event.getType() == LineEvent.Type.STOP || event.getType() == LineEvent.Type.CLOSE) {
+                        ACTIVE_CLIPS.remove(clip);
+                        if (clip.isOpen()) {
+                            clip.close();
+                        }
+                    }
+                });
+
+                clip.start();
+                GreatSageMod.LOGGER.info(
+                        "Reproduciendo voz de Rafael: url={}, formato={}, frames={}, duración≈{} ms",
+                        audioUrl,
+                        clip.getFormat(),
+                        clip.getFrameLength(),
+                        clip.getMicrosecondLength() / 1000L
+                );
+            }
+        } catch (Exception e) {
+            GreatSageMod.LOGGER.warn(
+                    "No se pudo reproducir la voz de Rafael desde '{}': {}",
+                    audioUrl,
+                    e.toString(),
+                    e
+            );
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private static boolean isClipFriendly(AudioFormat format) {
+        return AudioFormat.Encoding.PCM_SIGNED.equals(format.getEncoding())
+                && format.getSampleSizeInBits() == 16
+                && !format.isBigEndian();
+    }
+
+    private static void configureVolume(Clip clip, float volume) {
+        try {
+            FloatControl gainControl = (FloatControl) clip.getControl(FloatControl.Type.MASTER_GAIN);
+            float dB = (float) (20.0 * Math.log10(Math.max(0.0001, volume)));
+            gainControl.setValue(Math.max(gainControl.getMinimum(), Math.min(gainControl.getMaximum(), dB)));
+        } catch (Exception e) {
+            GreatSageMod.LOGGER.debug("El mixer de Java no expone MASTER_GAIN; se usará el volumen nativo del clip.");
         }
     }
 
     public static void playTypewriterTick() {
         Minecraft minecraft = Minecraft.getInstance();
-        double rawVolume = GreatSageClientConfig.CLIENT.voiceVolume.get();
-        float volume = (float) rawVolume;
+        float volume = (float) GreatSageClientConfig.CLIENT.voiceVolume.get().doubleValue();
         if (volume <= 0f) return;
 
         minecraft.execute(() -> {

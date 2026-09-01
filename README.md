@@ -1,105 +1,138 @@
-# 🌟 Great Sage Voice (Rafael) - Minecraft 1.20.1 Forge Mod (Ultimate Cinematic Edition)
+# 🌟 Great Sage Voice (Rafael) - Minecraft 1.20.1 Forge Mod
 
-¡El mod definitivo de **Minecraft 1.20.1 para Forge** que integra la icónica voz, la interfaz gráfica cinemática arcano-tecnológica y el sistema analítico de **Rafael** (El Gran Sabio / Raphaël) de **Tensei Shitara Slime Datta Ken** (*That Time I Got Reincarnated as a Slime*)!
+Mod Forge 1.20.1 con HUD cinemático, análisis de eventos y backend de síntesis de voz para Rafael / Gran Sabio.
 
----
+## Características principales
 
-## 💎 Características Principales & Mejoras Profesionales
+- HUD holográfico con núcleo luminoso, anillos contrarrotatorios, partículas y efecto typewriter.
+- `/rafael test <mensaje>` para probar la cadena completa servidor → backend → cliente → voz.
+- `/rafael status` para comprobar el HUD y la red S2C sin depender del backend.
+- Eventos automáticos: conexión, muerte, respawn, salud crítica, cambio de gamemode, items descartados y avances.
+- Backend FastAPI con caché de voces WAV.
+- Audio cliente mediante Java Sound con diagnóstico detallado en `latest.log`.
 
-1. **HUD Cinemático Holográfico (Interfaz del Gran Sabio):**
-   - **Núcleo Luminoso Reactivo:** Emite pulsaciones dinámicas de luz blanca y dorada que reaccionan al procesamiento y la escritura.
-   - **Doble Anillo Rúnico Concéntrico Contrarrotatorio:** Dos estructuras poligonales girando en direcciones opuestas que simulan el cálculo cuántico y mágico.
-   - **Efecto Máquina de Escribir (*Typewriter*):** El texto aparece letra por letra de manera fluida, acompañado de sutiles clics de audio cibernético (`Note Block Pling`).
-   - **Partículas Cuánticas Orbitales:** Partículas brillantes de energía dorada y cian que orbitan en torno al núcleo rúnico.
-   - **Líneas de Escaneo (*Scanlines*) y Telemetría:** Paneles laterales con indicadores de diagnóstico (`SYS:ACTIVE`, `ID: 0x9AF4`, `CORE 100%`, `STABLE`, `SECURE`).
+## Cadena real de voz
 
-2. **Comandos de Prueba y Sistema (`/rafael`):**
-   - `/rafael test <mensaje>` -> Permite probar manualmente la evaluación y respuesta analítica de Rafael en cualquier momento.
-   - `/rafael status` -> Muestra el estado operativo del sistema y la conexión con el Gran Sabio.
+1. `AIEventManager` envía el evento a `POST /rafael/evaluate`.
+2. FastAPI genera el texto y sintetiza la voz con gTTS.
+3. `imageio-ffmpeg` convierte el MP3 a WAV PCM signed 16-bit, mono, 24 kHz. No hace falta instalar FFmpeg manualmente.
+4. El backend devuelve `text`, `emotion`, `audio_url`, `audio_status` y, si falla la voz, `audio_error`.
+5. El servidor Minecraft parsea esa respuesta y envía los datos mediante `RafaelSpeechPacket` al cliente correcto.
+6. `GreatSageAudioPlayer` descarga el WAV, valida HTTP/formato, mantiene el `Clip` activo hasta terminar y registra cualquier error real.
 
-3. **Eventos Monitoreados en Tiempo Real:**
-   - Conexión al servidor y bienvenida.
-   - Muertes (con análisis de la causa exacta).
-   - Cambios de modo de juego (`/gamemode survival`, creative, etc.).
-   - Reaparición / Respawn (*Clone*).
-   - Salud crítica (advertencia cuando el jugador queda con 2 corazones o menos).
-   - Objetos droppeados y logros / avances completados.
+## Backend de voz
 
----
+Desde `D:\MC\Voice`:
 
-## 📂 Estructura del Proyecto
-
-```tree
-Voice/
-├── settings.gradle                 # Configuración raíz de Gradle con PluginManagement
-├── build.gradle                    # Dependencias y compilación Forge 1.20.1
-├── gradle.properties               # Versiones y JVM args optimizados (-Xmx3G)
-├── src/
-│   └── main/
-│       ├── java/
-│       │   └── com/
-│       │       └── rafael/
-│       │           ├── GreatSageMod.java          # Entrada principal Forge
-│       │           ├── command/
-│       │           │   └── RafaelCommand.java     # Comandos de chat (/rafael test / status)
-│       │           ├── config/
-│       │           │   ├── GreatSageConfig.java       # Config Servidor (Owner)
-│       │           │   └── GreatSageClientConfig.java # Config Cliente (HUD/Audio)
-│       │           ├── client/
-│       │           │   ├── GreatSageClient.java       # Cliente y registro de HUD
-│       │           │   ├── GreatSageHudOverlay.java   # HUD cinemático con Typewriter & Runic Rings
-│       │           │   └── GreatSageAudioPlayer.java  # Reproductor de voz y efectos de tecleo
-│       │           ├── network/
-│       │           │   └── PacketHandler.java     # Red S2C optimizada (PacketDistributor)
-│       │           └── server/
-│       │               └── AIEventManager.java    # Gestor de eventos avanzados
+```powershell
+cd D:\MC\Voice\ai_backend
+python -m pip install -r requirements.txt
+python main.py
 ```
 
----
+El backend escucha por defecto en `http://0.0.0.0:8000`.
 
-## 🚀 Compilación y Deploy Automático
+Prueba de salud:
 
-Ejecuta el script de PowerShell en tu terminal para compilar el mod y desplegarlo automáticamente en tu entorno y en tu carpeta de SKLauncher (`C:\Users\santi\AppData\Roaming\.sklauncher\instances\test-1\mods`):
+```powershell
+Invoke-RestMethod http://localhost:8000/health
+```
+
+Debe devolver `status = ok`.
+
+Configuración Minecraft (`config/great_sage_voice-server.toml` o `world/serverconfig/great_sage_voice-server.toml`):
+
+```toml
+aiEndpointUrl = "http://localhost:8000/rafael/evaluate"
+enableAI = true
+```
+
+Después, dentro del juego:
+
+```text
+/rafael test Hola Rafael, haz un diagnóstico del sistema
+```
+
+En la consola de Python debería aparecer `[Rafael] Voz lista: ...wav -> ...` y en `latest.log` debería aparecer `Reproduciendo voz de Rafael` con URL, formato y duración aproximada.
+
+### Servidor dedicado / jugadores remotos
+
+Si Minecraft Server llama al backend mediante `localhost`, esa dirección no sirve como URL de audio para los clientes remotos. Define una URL pública o LAN accesible por los jugadores antes de iniciar Python:
+
+```powershell
+$env:RAFAEL_PUBLIC_BASE_URL = "http://IP_O_DOMINIO_DEL_BACKEND:8000"
+python main.py
+```
+
+El backend usará esa dirección al construir `audio_url`.
+
+## Diagnóstico rápido
+
+- HUD aparece pero solo suena el efecto mágico: revisa `latest.log`; ahora indica si `audio_url` llegó vacío o si falló la descarga/reproducción.
+- `audio_status=unavailable`: revisa la consola de Python; `audio_error` identifica el fallo de síntesis/conversión.
+- HTTP 404/500 al bajar el WAV: comprueba `/health`, la carpeta `ai_backend/generated_audio/` y `RAFAEL_PUBLIC_BASE_URL` si usas servidor dedicado.
+- El backend funciona pero Minecraft cae al fallback: revisa `aiEndpointUrl` y el firewall.
+
+## Estructura del proyecto
+
+```text
+Voice/
+├── ai_backend/
+│   ├── main.py
+│   ├── requirements.txt
+│   └── generated_audio/          # generado en runtime
+├── src/main/java/com/rafael/
+│   ├── GreatSageMod.java
+│   ├── command/RafaelCommand.java
+│   ├── config/
+│   │   ├── GreatSageConfig.java
+│   │   └── GreatSageClientConfig.java
+│   ├── client/
+│   │   ├── GreatSageClient.java
+│   │   ├── GreatSageHudOverlay.java
+│   │   └── GreatSageAudioPlayer.java
+│   ├── network/PacketHandler.java
+│   └── server/AIEventManager.java
+├── build.gradle
+├── gradle.properties
+└── settings.gradle
+```
+
+## Compilación y deploy a `test-1`
 
 ```powershell
 $ErrorActionPreference = "Stop"
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host " Deploy Ultimate Edition (Rafael Mod)   " -ForegroundColor Cyan
+Write-Host " Deploy Great Sage Voice / Rafael       " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
-# 1. Actualizar repositorio
 if (Test-Path "D:\MC\Voice\.git") {
     Set-Location "D:\MC\Voice"
     git fetch origin
     git reset --hard origin/arena/01a05a43-voice
-    git pull origin arena/01a05a43-voice
 } else {
     if (Test-Path "D:\MC\Voice") { Remove-Item -Recurse -Force "D:\MC\Voice" }
     git clone -b arena/01a05a43-voice https://github.com/Santi-PdR/Voice.git "D:\MC\Voice"
     Set-Location "D:\MC\Voice"
 }
 
-# 2. Configurar memoria JVM y limpiar cachés
-$env:GRADLE_OPTS="-Xmx3G -Dfile.encoding=UTF-8"
+$env:GRADLE_OPTS = "-Xmx3G -Dfile.encoding=UTF-8"
 if (Test-Path ".gradle") { Remove-Item -Recurse -Force ".gradle" }
 if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
 
-# 3. Compilar
 & ./gradlew.bat build --no-daemon
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "❌ Error durante la compilación." -ForegroundColor Red
-    Read-Host "Presiona Enter para salir..."
-    exit 1
-}
+if ($LASTEXITCODE -ne 0) { throw "Gradle build falló." }
 
-# 4. Deploy a SKLauncher y D:\MC
-$Jar = Get-ChildItem "build/libs/*.jar" | Where-Object { $_.Name -notlike "*-sources.jar" -and $_.Name -notlike "*-deobf.jar" } | Select-Object -First 1
+$Jar = Get-ChildItem "build/libs/*.jar" |
+    Where-Object { $_.Name -notlike "*-sources.jar" -and $_.Name -notlike "*-deobf.jar" } |
+    Select-Object -First 1
+
+if (-not $Jar) { throw "No se encontró el JAR compilado." }
+
 $DestSK = "C:\Users\santi\AppData\Roaming\.sklauncher\instances\test-1\mods"
-if (-not (Test-Path $DestSK)) { New-Item -ItemType Directory -Force -Path $DestSK | Out-Null }
-
+New-Item -ItemType Directory -Force -Path $DestSK | Out-Null
 Copy-Item $Jar.FullName -Destination "D:\MC" -Force
 Copy-Item $Jar.FullName -Destination $DestSK -Force
 
-Write-Host "🎉 ¡Build y Deploy completados con éxito!" -ForegroundColor Green
-Read-Host "Presiona Enter para cerrar..."
+Write-Host "Build y deploy completados: $($Jar.Name)" -ForegroundColor Green
 ```

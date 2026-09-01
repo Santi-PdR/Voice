@@ -1,5 +1,7 @@
 package com.rafael.server;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.rafael.GreatSageMod;
 import com.rafael.command.RafaelCommand;
 import com.rafael.config.GreatSageConfig;
@@ -16,6 +18,9 @@ import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -24,6 +29,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 @Mod.EventBusSubscriber(modid = GreatSageMod.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class AIEventManager {
@@ -118,7 +124,6 @@ public class AIEventManager {
     public static void onAdvancement(AdvancementEvent.AdvancementEarnEvent event) {
         if (!GreatSageConfig.SERVER.enableAI.get()) return;
         if (event.getEntity() instanceof ServerPlayer player) {
-            // Obtener título del logro de forma segura en Forge 1.20.1
             String defaultText = "Notificación: Se ha registrado un nuevo hito / avance en el progreso del usuario. Capacidad analítica expandida.";
             try {
                 String advName = event.getAdvancement().getId().getPath();
@@ -132,42 +137,86 @@ public class AIEventManager {
         CompletableFuture.runAsync(() -> {
             String endpointUrl = GreatSageConfig.SERVER.aiEndpointUrl.get();
             String apiKey = GreatSageConfig.SERVER.apiKey.get();
+            HttpURLConnection conn = null;
 
             try {
                 URL url = new URL(endpointUrl);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
-                conn.setRequestProperty("Content-Type", "application/json; utf-8");
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                conn.setRequestProperty("Accept", "application/json");
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(30000);
                 if (!apiKey.isEmpty()) {
                     conn.setRequestProperty("Authorization", "Bearer " + apiKey);
                 }
                 conn.setDoOutput(true);
 
-                String jsonInputString = String.format(
-                        "{\"player\": \"%s\", \"event\": \"%s\", \"health\": %.1f, \"dimension\": \"%s\"}",
-                        player.getName().getString(),
-                        eventType,
-                        player.getHealth(),
-                        player.level().dimension().location().toString()
-                );
+                JsonObject requestJson = new JsonObject();
+                requestJson.addProperty("player", player.getName().getString());
+                requestJson.addProperty("event", eventType);
+                requestJson.addProperty("detail", defaultFallbackText);
+                requestJson.addProperty("health", player.getHealth());
+                requestJson.addProperty("dimension", player.level().dimension().location().toString());
 
                 try (OutputStream os = conn.getOutputStream()) {
-                    byte[] input = jsonInputString.getBytes(StandardCharsets.UTF_8);
-                    os.write(input, 0, input.length);
+                    os.write(requestJson.toString().getBytes(StandardCharsets.UTF_8));
                 }
 
                 int responseCode = conn.getResponseCode();
-                if (responseCode == 200) {
-                    GreatSageMod.LOGGER.info("IA del servidor consultada exitosamente para evento: {}", eventType);
+                if (responseCode >= 200 && responseCode < 300) {
+                    String responseBody = readBody(conn.getInputStream());
+                    JsonObject responseJson = JsonParser.parseString(responseBody).getAsJsonObject();
+
+                    String text = getString(responseJson, "text", defaultFallbackText);
+                    String audioUrl = getString(responseJson, "audio_url", "");
+                    String emotion = getString(responseJson, "emotion", "analytical");
+                    String audioStatus = getString(responseJson, "audio_status", audioUrl.isEmpty() ? "missing" : "ready");
+                    String audioError = getString(responseJson, "audio_error", "");
+
+                    PacketHandler.sendToClient(player, text, audioUrl, emotion);
+                    GreatSageMod.LOGGER.info(
+                            "IA consultada para '{}': texto={} chars, audioStatus={}, audioUrl={}",
+                            eventType, text.length(), audioStatus, audioUrl.isEmpty() ? "<vacía>" : audioUrl
+                    );
+                    if (audioUrl.isEmpty() && !audioError.isEmpty()) {
+                        GreatSageMod.LOGGER.warn("Backend respondió sin voz para '{}': {}", eventType, audioError);
+                    }
                 } else {
-                    GreatSageMod.LOGGER.warn("El servidor de IA respondió con código {}. Usando análisis estándar de Rafael.", responseCode);
+                    String errorBody = conn.getErrorStream() != null ? readBody(conn.getErrorStream()) : "";
+                    GreatSageMod.LOGGER.warn(
+                            "El servidor de IA respondió HTTP {} para '{}'. Respuesta: {}. Usando fallback local.",
+                            responseCode, eventType, errorBody
+                    );
                     PacketHandler.sendToClient(player, defaultFallbackText, "", "analytical");
                 }
-
             } catch (Exception e) {
-                GreatSageMod.LOGGER.debug("No se pudo conectar al endpoint de IA del servidor ({}: {}). Usando voz analítica local.", endpointUrl, e.getMessage());
+                GreatSageMod.LOGGER.warn(
+                        "Falló la consulta a Rafael en {} para '{}': {}. Usando fallback local.",
+                        endpointUrl, eventType, e.toString(), e
+                );
                 PacketHandler.sendToClient(player, defaultFallbackText, "", "analytical");
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
             }
         });
+    }
+
+    private static String readBody(InputStream stream) throws Exception {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            return reader.lines().collect(Collectors.joining("\n"));
+        }
+    }
+
+    private static String getString(JsonObject json, String key, String fallback) {
+        if (json.has(key) && !json.get(key).isJsonNull()) {
+            try {
+                String value = json.get(key).getAsString();
+                return value != null ? value : fallback;
+            } catch (Exception ignored) {}
+        }
+        return fallback;
     }
 }
