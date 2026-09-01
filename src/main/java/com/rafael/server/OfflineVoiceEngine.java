@@ -1,0 +1,428 @@
+package com.rafael.server;
+
+import com.rafael.GreatSageMod;
+import com.rafael.config.GreatSageConfig;
+import net.minecraftforge.fml.loading.FMLPaths;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+/**
+ * Self-managed offline TTS runtime. Downloads Piper + an open Spanish voice once,
+ * caches them under the Minecraft/server directory and synthesizes WAV locally.
+ * No API key, account, Python service or persistent terminal is required.
+ */
+public final class OfflineVoiceEngine {
+    private static final Object INSTALL_LOCK = new Object();
+    private static final String PIPER_RELEASE = "2023.11.14-2";
+    private static final String PIPER_RELEASE_BASE = "https://github.com/rhasspy/piper/releases/download/" + PIPER_RELEASE + "/";
+    private static final String MODEL_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_AR/daniela/high/";
+    private static final String MODEL_NAME = "es_AR-daniela-high.onnx";
+    private static final String CONFIG_NAME = MODEL_NAME + ".json";
+    private static final String MODEL_SHA256 = "7ceb1fc0dab349418c5b54a639ae9ee595212d7c9ea422220d8419163d5cc985";
+    private static final long MIN_MODEL_BYTES = 110_000_000L;
+    private static final long MIN_ENGINE_ARCHIVE_BYTES = 15_000_000L;
+
+    private static volatile Path executable;
+    private static volatile Path modelPath;
+    private static volatile Path configPath;
+    private static volatile String state = "pendiente";
+    private static volatile String detail = "La voz offline todavía no fue preparada.";
+
+    private OfflineVoiceEngine() {}
+
+    public static void prepare() throws Exception {
+        ensureReady();
+    }
+
+    public static boolean isReady() {
+        Path exe = executable;
+        Path model = modelPath;
+        Path config = configPath;
+        return exe != null && model != null && config != null && Files.isRegularFile(exe) && Files.isRegularFile(model) && Files.isRegularFile(config);
+    }
+
+    public static String statusSummary() {
+        return state + (detail == null || detail.isBlank() ? "" : " (" + detail + ")");
+    }
+
+    public static byte[] synthesize(String text) throws Exception {
+        if (text == null || text.isBlank()) return new byte[0];
+        ensureReady();
+
+        Path outputDir = runtimeRoot().resolve("output");
+        Files.createDirectories(outputDir);
+        Path output = Files.createTempFile(outputDir, "rafael-", ".wav");
+
+        List<String> command = new ArrayList<>();
+        command.add(executable.toAbsolutePath().toString());
+        command.add("--model");
+        command.add(modelPath.toAbsolutePath().toString());
+        command.add("--config");
+        command.add(configPath.toAbsolutePath().toString());
+        command.add("--output_file");
+        command.add(output.toAbsolutePath().toString());
+        command.add("--length_scale");
+        command.add(formatDouble(GreatSageConfig.SERVER.offlineLengthScale.get()));
+        command.add("--noise_scale");
+        command.add(formatDouble(GreatSageConfig.SERVER.offlineNoiseScale.get()));
+        command.add("--noise_w");
+        command.add(formatDouble(GreatSageConfig.SERVER.offlineNoiseWidth.get()));
+        command.add("--sentence_silence");
+        command.add("0.08");
+        command.add("--quiet");
+
+        ProcessBuilder builder = new ProcessBuilder(command);
+        Path engineDir = executable.getParent();
+        builder.directory(engineDir.toFile());
+        builder.redirectErrorStream(true);
+        String os = osName();
+        if ("linux".equals(os)) prependEnv(builder, "LD_LIBRARY_PATH", engineDir.toAbsolutePath().toString());
+        if ("mac".equals(os)) prependEnv(builder, "DYLD_LIBRARY_PATH", engineDir.toAbsolutePath().toString());
+
+        Process process = builder.start();
+        String cleanText = text.replace('…', '.').replace('\r', ' ').replace('\n', ' ').trim();
+        try (OutputStream stdin = process.getOutputStream()) {
+            stdin.write(cleanText.getBytes(StandardCharsets.UTF_8));
+            stdin.write('\n');
+        }
+
+        boolean finished = process.waitFor(GreatSageConfig.SERVER.offlineSynthesisTimeoutSeconds.get(), TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            Files.deleteIfExists(output);
+            throw new IOException("Piper excedió el tiempo máximo de síntesis.");
+        }
+        byte[] processLog = process.getInputStream().readAllBytes();
+        if (process.exitValue() != 0) {
+            Files.deleteIfExists(output);
+            throw new IOException("Piper terminó con código " + process.exitValue() + ": " + abbreviate(new String(processLog, StandardCharsets.UTF_8), 500));
+        }
+        if (!Files.isRegularFile(output) || Files.size(output) < 44) {
+            Files.deleteIfExists(output);
+            throw new IOException("Piper no produjo un WAV válido.");
+        }
+
+        byte[] wav = Files.readAllBytes(output);
+        Files.deleteIfExists(output);
+        return wav;
+    }
+
+    private static void ensureReady() throws Exception {
+        if (isReady()) return;
+        synchronized (INSTALL_LOCK) {
+            if (isReady()) return;
+            if (!GreatSageConfig.SERVER.autoInstallOfflineVoice.get()) {
+                state = "desactivada";
+                detail = "autoInstallOfflineVoice=false";
+                throw new IOException("La instalación automática de voz offline está desactivada.");
+            }
+
+            state = "preparando";
+            detail = "detectando plataforma";
+            Path root = runtimeRoot();
+            Path engineRoot = root.resolve("engine");
+            Path voiceRoot = root.resolve("voice");
+            Files.createDirectories(engineRoot);
+            Files.createDirectories(voiceRoot);
+
+            Path foundExe = findPiperExecutable(engineRoot);
+            if (foundExe == null) {
+                PlatformAsset asset = platformAsset();
+                Path archive = root.resolve(asset.fileName());
+                download(asset.url(), archive, MIN_ENGINE_ARCHIVE_BYTES, "motor Piper");
+                state = "preparando";
+                detail = "extrayendo motor Piper";
+                if (asset.zip()) extractZip(archive, engineRoot); else extractTarGz(archive, engineRoot);
+                Files.deleteIfExists(archive);
+                foundExe = findPiperExecutable(engineRoot);
+                if (foundExe == null) throw new IOException("No se encontró el ejecutable de Piper después de extraer el runtime.");
+            }
+            makeExecutable(foundExe);
+            makeNearbyExecutables(foundExe.getParent());
+
+            Path model = voiceRoot.resolve(MODEL_NAME);
+            Path config = voiceRoot.resolve(CONFIG_NAME);
+            if (!Files.isRegularFile(model) || Files.size(model) < MIN_MODEL_BYTES || !MODEL_SHA256.equalsIgnoreCase(sha256(model))) {
+                Files.deleteIfExists(model);
+                download(MODEL_BASE + MODEL_NAME + "?download=true", model, MIN_MODEL_BYTES, "voz Daniela high");
+                String digest = sha256(model);
+                if (!MODEL_SHA256.equalsIgnoreCase(digest)) {
+                    Files.deleteIfExists(model);
+                    throw new IOException("Checksum del modelo de voz inválido: " + digest);
+                }
+            }
+            if (!Files.isRegularFile(config) || Files.size(config) < 1000) {
+                Files.deleteIfExists(config);
+                download(MODEL_BASE + CONFIG_NAME + "?download=true", config, 1000, "configuración de voz");
+            }
+
+            executable = foundExe;
+            modelPath = model;
+            configPath = config;
+            state = "lista";
+            detail = "Piper local + Daniela high";
+            GreatSageMod.LOGGER.info("Voz offline de Rafael preparada: motor='{}', modelo='{}'", executable, modelPath);
+        }
+    }
+
+    private static Path runtimeRoot() {
+        return FMLPaths.GAMEDIR.get().resolve("great_sage_voice").resolve("offline_voice");
+    }
+
+    private static PlatformAsset platformAsset() throws IOException {
+        String os = osName();
+        String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+        if ("windows".equals(os) && isX64(arch)) return new PlatformAsset("piper_windows_amd64.zip", true);
+        if ("linux".equals(os) && isX64(arch)) return new PlatformAsset("piper_linux_x86_64.tar.gz", false);
+        if ("linux".equals(os) && isArm64(arch)) return new PlatformAsset("piper_linux_aarch64.tar.gz", false);
+        if ("mac".equals(os) && isX64(arch)) return new PlatformAsset("piper_macos_x64.tar.gz", false);
+        if ("mac".equals(os) && isArm64(arch)) return new PlatformAsset("piper_macos_aarch64.tar.gz", false);
+        state = "no compatible";
+        detail = os + "/" + arch;
+        throw new IOException("Plataforma no soportada por el runtime Piper integrado: " + os + "/" + arch);
+    }
+
+    private static String osName() {
+        String value = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (value.contains("win")) return "windows";
+        if (value.contains("mac") || value.contains("darwin")) return "mac";
+        if (value.contains("linux")) return "linux";
+        return value.replaceAll("\\s+", "_");
+    }
+
+    private static boolean isX64(String arch) { return arch.contains("amd64") || arch.contains("x86_64") || arch.contains("x64"); }
+    private static boolean isArm64(String arch) { return arch.contains("aarch64") || arch.contains("arm64"); }
+
+    private static void download(String url, Path target, long minBytes, String label) throws IOException {
+        Files.createDirectories(target.getParent());
+        Path temp = target.resolveSibling(target.getFileName() + ".part");
+        Files.deleteIfExists(temp);
+
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        connection.setInstanceFollowRedirects(true);
+        connection.setConnectTimeout(15_000);
+        connection.setReadTimeout(60_000);
+        connection.setRequestProperty("User-Agent", "GreatSageVoice/1.2.0");
+        int code = connection.getResponseCode();
+        if (code < 200 || code >= 300) {
+            connection.disconnect();
+            throw new IOException("No se pudo descargar " + label + ": HTTP " + code);
+        }
+        long expected = connection.getContentLengthLong();
+        state = "descargando";
+        detail = label;
+        GreatSageMod.LOGGER.info("Rafael descargando {} ({} MB aprox.)...", label, expected > 0 ? Math.max(1, expected / 1_000_000L) : "?");
+        long total = 0;
+        int lastBucket = -1;
+        try (InputStream input = new BufferedInputStream(connection.getInputStream()); OutputStream output = new BufferedOutputStream(Files.newOutputStream(temp))) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) >= 0) {
+                if (read == 0) continue;
+                output.write(buffer, 0, read);
+                total += read;
+                if (expected > 0) {
+                    int bucket = (int) ((total * 10L) / expected);
+                    if (bucket != lastBucket && bucket >= 1) {
+                        lastBucket = bucket;
+                        detail = label + " " + Math.min(100, bucket * 10) + "%";
+                    }
+                }
+            }
+        } finally {
+            connection.disconnect();
+        }
+        if (total < minBytes) {
+            Files.deleteIfExists(temp);
+            throw new IOException("Descarga incompleta de " + label + ": " + total + " bytes.");
+        }
+        moveReplace(temp, target);
+    }
+
+    private static void extractZip(Path archive, Path destination) throws IOException {
+        try (ZipInputStream zip = new ZipInputStream(new BufferedInputStream(Files.newInputStream(archive)))) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                Path target = safeResolve(destination, entry.getName());
+                if (entry.isDirectory()) Files.createDirectories(target);
+                else {
+                    Files.createDirectories(target.getParent());
+                    try (OutputStream output = new BufferedOutputStream(Files.newOutputStream(target))) { zip.transferTo(output); }
+                }
+                zip.closeEntry();
+            }
+        }
+    }
+
+    private static void extractTarGz(Path archive, Path destination) throws IOException {
+        List<SymlinkEntry> links = new ArrayList<>();
+        try (InputStream input = new GZIPInputStream(new BufferedInputStream(Files.newInputStream(archive)))) {
+            byte[] header = new byte[512];
+            while (true) {
+                int headerRead = readFully(input, header, 0, 512);
+                if (headerRead == 0 || isZeroBlock(header)) break;
+                if (headerRead != 512) throw new IOException("Cabecera TAR incompleta.");
+                String name = tarString(header, 0, 100);
+                String prefix = tarString(header, 345, 155);
+                if (!prefix.isBlank()) name = prefix + "/" + name;
+                long size = tarOctal(header, 124, 12);
+                char type = (char) header[156];
+                String linkName = tarString(header, 157, 100);
+                Path target = safeResolve(destination, name);
+
+                if (type == '5') {
+                    Files.createDirectories(target);
+                    skipFully(input, size);
+                } else if (type == '2') {
+                    Files.createDirectories(target.getParent());
+                    links.add(new SymlinkEntry(target, linkName));
+                    skipFully(input, size);
+                } else if (type == 0 || type == '0') {
+                    Files.createDirectories(target.getParent());
+                    try (OutputStream output = new BufferedOutputStream(Files.newOutputStream(target))) { copyExactly(input, output, size); }
+                } else {
+                    skipFully(input, size);
+                }
+                long padding = (512 - (size % 512)) % 512;
+                skipFully(input, padding);
+            }
+        }
+        for (SymlinkEntry link : links) createSymlinkOrCopy(link.path(), link.target());
+    }
+
+    private static void createSymlinkOrCopy(Path link, String targetText) throws IOException {
+        Files.deleteIfExists(link);
+        try {
+            Files.createSymbolicLink(link, Path.of(targetText));
+        } catch (Exception ignored) {
+            Path source = link.getParent().resolve(targetText).normalize();
+            if (Files.isRegularFile(source)) Files.copy(source, link, StandardCopyOption.REPLACE_EXISTING);
+            else GreatSageMod.LOGGER.warn("No se pudo recrear enlace de Piper '{}' -> '{}'", link, targetText);
+        }
+    }
+
+    private static Path findPiperExecutable(Path root) throws IOException {
+        if (!Files.exists(root)) return null;
+        String wanted = "windows".equals(osName()) ? "piper.exe" : "piper";
+        try (var stream = Files.walk(root, 4)) {
+            return stream.filter(Files::isRegularFile).filter(path -> path.getFileName().toString().equalsIgnoreCase(wanted)).findFirst().orElse(null);
+        }
+    }
+
+    private static void makeNearbyExecutables(Path directory) {
+        if (directory == null || !Files.isDirectory(directory)) return;
+        try (var stream = Files.list(directory)) {
+            stream.filter(Files::isRegularFile).filter(path -> {
+                String n = path.getFileName().toString().toLowerCase(Locale.ROOT);
+                return n.equals("piper") || n.equals("piper_phonemize") || n.equals("espeak-ng");
+            }).forEach(OfflineVoiceEngine::makeExecutable);
+        } catch (Exception ignored) {}
+    }
+
+    private static void makeExecutable(Path path) {
+        if (path != null) path.toFile().setExecutable(true, false);
+    }
+
+    private static void prependEnv(ProcessBuilder builder, String key, String value) {
+        String old = builder.environment().get(key);
+        builder.environment().put(key, value + (old == null || old.isBlank() ? "" : java.io.File.pathSeparator + old));
+    }
+
+    private static Path safeResolve(Path root, String child) throws IOException {
+        Path resolved = root.resolve(child).normalize();
+        if (!resolved.startsWith(root.normalize())) throw new IOException("Entrada de archivo insegura: " + child);
+        return resolved;
+    }
+
+    private static String sha256(Path path) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream input = Files.newInputStream(path)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) >= 0) if (read > 0) digest.update(buffer, 0, read);
+        }
+        StringBuilder out = new StringBuilder(64);
+        for (byte b : digest.digest()) out.append(String.format(Locale.ROOT, "%02x", b));
+        return out.toString();
+    }
+
+    private static void moveReplace(Path source, Path target) throws IOException {
+        try { Files.move(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE); }
+        catch (Exception ignored) { Files.move(source, target, StandardCopyOption.REPLACE_EXISTING); }
+    }
+
+    private static boolean isZeroBlock(byte[] block) {
+        for (byte b : block) if (b != 0) return false;
+        return true;
+    }
+
+    private static String tarString(byte[] block, int offset, int length) {
+        int end = offset;
+        int max = Math.min(block.length, offset + length);
+        while (end < max && block[end] != 0) end++;
+        return new String(block, offset, Math.max(0, end - offset), StandardCharsets.UTF_8).trim();
+    }
+
+    private static long tarOctal(byte[] block, int offset, int length) {
+        String value = tarString(block, offset, length).replace("\u0000", "").trim();
+        if (value.isEmpty()) return 0L;
+        try { return Long.parseLong(value, 8); } catch (NumberFormatException e) { return 0L; }
+    }
+
+    private static int readFully(InputStream input, byte[] buffer, int offset, int length) throws IOException {
+        int total = 0;
+        while (total < length) {
+            int read = input.read(buffer, offset + total, length - total);
+            if (read < 0) break;
+            total += read;
+        }
+        return total;
+    }
+
+    private static void copyExactly(InputStream input, OutputStream output, long size) throws IOException {
+        byte[] buffer = new byte[64 * 1024];
+        long remaining = size;
+        while (remaining > 0) {
+            int read = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+            if (read < 0) throw new IOException("TAR terminó antes de completar un archivo.");
+            output.write(buffer, 0, read);
+            remaining -= read;
+        }
+    }
+
+    private static void skipFully(InputStream input, long bytes) throws IOException {
+        long remaining = bytes;
+        while (remaining > 0) {
+            long skipped = input.skip(remaining);
+            if (skipped > 0) { remaining -= skipped; continue; }
+            if (input.read() < 0) throw new IOException("TAR terminó durante un salto.");
+            remaining--;
+        }
+    }
+
+    private static String formatDouble(double value) { return String.format(Locale.ROOT, "%.3f", value); }
+    private static String abbreviate(String value, int max) { return value.length() <= max ? value : value.substring(0, max) + "…"; }
+
+    private record PlatformAsset(String fileName, boolean zip) {
+        String url() { return PIPER_RELEASE_BASE + fileName; }
+    }
+    private record SymlinkEntry(Path path, String target) {}
+}

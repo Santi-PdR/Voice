@@ -1,40 +1,85 @@
-# Voice setup
+# Voice setup — v1.2.0
 
-## Runtime model
+## Default: nothing to configure
 
-Great Sage Voice v1.1 does not run a Python backend. The Forge server performs outbound HTTPS requests to the selected provider, receives audio in memory and sends it directly to the target Minecraft client.
+Great Sage Voice now uses self-managed offline Piper speech by default.
 
-There is no `localhost:8000`, FastAPI, FFmpeg service or terminal window to keep open.
+You do **not** need:
 
-## Recommended OpenAI setup
+- an OpenAI key;
+- an ElevenLabs key;
+- Python;
+- FastAPI;
+- FFmpeg running as a service;
+- localhost ports;
+- a second PowerShell/CMD window;
+- an account with a TTS provider.
 
-Use:
+## First run
 
-- TTS provider: `openai`
-- model: `gpt-4o-mini-tts`
-- built-in voice: `marin` by default
-- response format: WAV
+When a Minecraft integrated/dedicated server starts, Rafael begins voice preparation asynchronously if `prewarmOfflineVoice=true`.
 
-The server controls delivery with `voiceInstructions`. The default profile requests a calm, precise, adult feminine, slightly ethereal system voice. Adjust the descriptive traits instead of asking a model to impersonate a real actor.
+If the runtime/model are not cached yet the mod downloads:
 
-The API key can be supplied as `OPENAI_API_KEY` by the server host. If environment variables are unavailable, use `openAiApiKey` in `world/serverconfig/great_sage_voice-server.toml` and protect that file.
+- the matching Piper runtime for Windows/Linux/macOS;
+- the `es_AR-daniela-high` ONNX voice and its config.
 
-## Optional ElevenLabs setup
+The model file is checked against a pinned SHA-256 before use. Downloads use fixed HTTPS upstream locations and safe archive extraction.
 
-Set `ttsProvider = "elevenlabs"`, provide `ELEVENLABS_API_KEY` (or `elevenLabsApiKey`) and configure a `elevenLabsVoiceId`.
+Runtime cache:
 
-For the Rafael aesthetic, prefer a voice created with Voice Design from descriptive traits. A suitable design direction is:
+```text
+<game-or-server-dir>/great_sage_voice/offline_voice/
+```
 
-> Adult feminine synthetic intelligence voice, neutral Spanish, calm and highly controlled, crystalline articulation, low emotional variance, subtle ethereal resonance, precise analytical cadence, protective authority, concise delivery, no commercial narrator energy, no exaggerated anime caricature.
+Approximate first-time download: 140 MB. It is not repeated while valid cached files remain.
 
-Choose a preview you like and use its resulting Voice ID. Do not upload or clone a dub actor's recordings unless you have the necessary rights and consent.
+## Test
 
-## Dedicated servers
+```text
+/rafael status
+/rafael voice
+```
 
-The server machine/host needs outbound HTTPS access to the selected provider. Clients do not need provider accounts or keys.
+During the first preparation `/rafael status` may report `preparando` or `descargando`. When ready it reports `Piper local + Daniela high`.
 
-If outbound provider access is blocked or credentials are absent, the mod falls back to local text and HUD behavior without crashing.
+Then test contextual local analysis:
 
-## Bandwidth
+```text
+/rafael test realiza un diagnostico del sistema
+/rafael test cual es mi salud
+/rafael test en que dimension estoy
+/rafael test hay peligro
+```
 
-Generated speech is kept compact and transmitted only to the target player. Responses are capped and audio packets are bounded to avoid oversized custom payloads. Repeated identical speech can be served from the in-memory server cache.
+## Voice character tuning
+
+Server config values:
+
+```toml
+ttsProvider = "offline"
+autoInstallOfflineVoice = true
+prewarmOfflineVoice = true
+offlineLengthScale = 1.10
+offlineNoiseScale = 0.48
+offlineNoiseWidth = 0.55
+```
+
+Client config:
+
+```toml
+voiceVolume = 1.0
+voiceAuraIntensity = 0.10
+```
+
+Higher `offlineLengthScale` = slower speech. Lower noise values = more controlled/systematic delivery.
+
+## Optional cloud providers
+
+`openai` and `elevenlabs` remain optional compatibility/enhancement paths. They are never required. If selected but unconfigured or unavailable, voice automatically falls back to Piper offline.
+
+## Dedicated hosts
+
+Clients never download the voice model because the Forge server synthesizes the WAV and sends only the resulting bounded audio packet to the player who should hear it.
+
+The host needs outbound HTTPS for initial automatic installation. Once cached, synthesis is local and does not depend on a provider being online.

@@ -15,28 +15,41 @@ public final class RafaelCommand {
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(Commands.literal("rafael")
-                .then(Commands.literal("test").then(Commands.argument("message", StringArgumentType.greedyString()).executes(context -> {
-                    ServerPlayer player = context.getSource().getPlayerOrException();
-                    String message = StringArgumentType.getString(context, "message").trim();
-                    if (message.isEmpty()) { context.getSource().sendFailure(Component.literal("§cEscribe un mensaje para Rafael.")); return 0; }
-                    String fallback = "Consulta recibida. " + message;
-                    AIEventManager.triggerAIEvent(player, "Prueba Manual", message, fallback, true);
-                    context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §7Procesando análisis y voz desde el servidor..."), false);
-                    return 1;
-                })))
-                .then(Commands.literal("voice").executes(context -> {
-                    ServerPlayer player = context.getSource().getPlayerOrException();
-                    String phrase = "Sistema de voz operativo. Sincronización acústica completada.";
-                    AIEventManager.triggerAIEvent(player, "Prueba de Voz", phrase, phrase, true);
-                    context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §7Solicitando prueba de síntesis de voz..."), false);
-                    return 1;
-                }))
-                .then(Commands.literal("status").executes(context -> {
-                    ServerPlayer player = context.getSource().getPlayerOrException();
-                    String status = RafaelService.statusSummary();
-                    PacketHandler.sendToClient(player, status, new byte[0], "sync", false);
-                    context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §f" + status), false);
-                    return 1;
-                })));
+                .then(Commands.literal("test")
+                        .then(Commands.argument("message", StringArgumentType.greedyString())
+                                .executes(context -> {
+                                    ServerPlayer player = context.getSource().getPlayerOrException();
+                                    String message = StringArgumentType.getString(context, "message").trim();
+                                    if (message.isEmpty()) {
+                                        context.getSource().sendFailure(Component.literal("§cEscribe un mensaje para Rafael."));
+                                        return 0;
+                                    }
+                                    String fallback = "Consulta recibida. " + message;
+                                    AIEventManager.triggerAIEvent(player, "Prueba Manual", message, fallback, false);
+                                    context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §7Analizando con el núcleo local; la voz se genera sin API key."), false);
+                                    return 1;
+                                })))
+                .then(Commands.literal("voice")
+                        .executes(context -> {
+                            ServerPlayer player = context.getSource().getPlayerOrException();
+                            String phrase = "Sistema vocal offline operativo. Sincronización acústica completada.";
+                            AIEventManager.triggerAIEvent(player, "Prueba de Voz", phrase, phrase, false);
+                            context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §7Preparando síntesis local. La primera ejecución puede descargar el modelo automáticamente."), false);
+                            return 1;
+                        }))
+                .then(Commands.literal("status")
+                        .executes(context -> {
+                            ServerPlayer player = context.getSource().getPlayerOrException();
+                            String status = RafaelService.statusSummary();
+                            PacketHandler.sendToClient(player, status, new byte[0], "sync", false);
+                            context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §f" + status), false);
+                            return 1;
+                        }))
+                .then(Commands.literal("prepare")
+                        .executes(context -> {
+                            RafaelService.prewarmVoice();
+                            context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §7Preparación offline solicitada. Usa /rafael status para ver el estado."), false);
+                            return 1;
+                        })));
     }
 }

@@ -9,6 +9,12 @@ public class GreatSageConfig {
         public final ForgeConfigSpec.BooleanValue enableGeneratedResponses;
         public final ForgeConfigSpec.BooleanValue enableVoice;
         public final ForgeConfigSpec.ConfigValue<String> ttsProvider;
+        public final ForgeConfigSpec.BooleanValue autoInstallOfflineVoice;
+        public final ForgeConfigSpec.BooleanValue prewarmOfflineVoice;
+        public final ForgeConfigSpec.DoubleValue offlineLengthScale;
+        public final ForgeConfigSpec.DoubleValue offlineNoiseScale;
+        public final ForgeConfigSpec.DoubleValue offlineNoiseWidth;
+        public final ForgeConfigSpec.IntValue offlineSynthesisTimeoutSeconds;
         public final ForgeConfigSpec.ConfigValue<String> openAiApiKey;
         public final ForgeConfigSpec.ConfigValue<String> openAiResponseModel;
         public final ForgeConfigSpec.ConfigValue<String> openAiTtsModel;
@@ -24,43 +30,56 @@ public class GreatSageConfig {
         public final ForgeConfigSpec.BooleanValue announcePlayerDeath;
         public final ForgeConfigSpec.BooleanValue announceRespawn;
         public final ForgeConfigSpec.BooleanValue announceLowHealth;
+        public final ForgeConfigSpec.BooleanValue announceLowFood;
         public final ForgeConfigSpec.BooleanValue announceGamemodeChanges;
+        public final ForgeConfigSpec.BooleanValue announceDimensionChanges;
         public final ForgeConfigSpec.BooleanValue announceAdvancements;
         public final ForgeConfigSpec.BooleanValue announceItemDrops;
 
         public Server(ForgeConfigSpec.Builder builder) {
             builder.push("Great Sage / Rafael - Server Native AI and Voice");
             enableAI = builder.comment("Master switch for automatic Rafael reactions. Commands remain available for diagnostics.").define("enableAI", true);
-            enableGeneratedResponses = builder.comment("Generate contextual responses with OpenAI from the Forge server. If false or no API key exists, Rafael uses local deterministic responses.").define("enableGeneratedResponses", true);
-            enableVoice = builder.comment("Generate synthetic speech on the Forge server and transmit WAV audio directly to clients. No Python/localhost process is required.").define("enableVoice", true);
-            ttsProvider = builder.comment("TTS provider: openai or elevenlabs. API keys stay server-side and are never sent to players.").define("ttsProvider", "openai");
+            enableGeneratedResponses = builder.comment("Optional cloud-enhanced contextual responses. Without a server API key Rafael automatically uses the improved local analytical brain; the mod remains fully functional.").define("enableGeneratedResponses", true);
+            enableVoice = builder.comment("Enable Rafael speech. The default path is fully local Piper TTS: no API key, account, Python service or persistent terminal is required.").define("enableVoice", true);
+            ttsProvider = builder.comment("Voice provider: offline (recommended/default), openai or elevenlabs. If a cloud provider is selected but unavailable, Rafael automatically falls back to offline voice.").define("ttsProvider", "offline");
 
-            builder.push("OpenAI");
-            openAiApiKey = builder.comment("Optional OpenAI API key. Prefer the OPENAI_API_KEY environment variable on a dedicated host. Never distribute a server config containing this key to clients.").define("openAiApiKey", "");
-            openAiResponseModel = builder.comment("OpenAI Responses model used for short contextual analysis.").define("openAiResponseModel", "gpt-5.6-luna");
-            openAiTtsModel = builder.comment("OpenAI speech model.").define("openAiTtsModel", "gpt-4o-mini-tts");
-            openAiVoice = builder.comment("OpenAI built-in TTS voice. 'marin' is the default quality-oriented profile; you may choose another supported built-in voice.").define("openAiVoice", "marin");
+            builder.push("OfflineVoice");
+            autoInstallOfflineVoice = builder.comment("Automatically download the Piper runtime and the open Spanish Daniela high voice on first use. Files are cached and reused afterwards.").define("autoInstallOfflineVoice", true);
+            prewarmOfflineVoice = builder.comment("Prepare/download the offline voice asynchronously when the Forge server starts, so the first spoken event does not have to wait for setup.").define("prewarmOfflineVoice", true);
+            offlineLengthScale = builder.comment("Piper phoneme length. Values above 1.0 speak more slowly; 1.10 gives Rafael a calm, controlled cadence.").defineInRange("offlineLengthScale", 1.10, 0.75, 1.60);
+            offlineNoiseScale = builder.comment("Piper generator variation. Lower values sound more controlled/systematic.").defineInRange("offlineNoiseScale", 0.48, 0.10, 1.20);
+            offlineNoiseWidth = builder.comment("Piper phoneme-width variation. Lower values reduce expressive randomness.").defineInRange("offlineNoiseWidth", 0.55, 0.10, 1.20);
+            offlineSynthesisTimeoutSeconds = builder.comment("Maximum local TTS synthesis time after the model is ready.").defineInRange("offlineSynthesisTimeoutSeconds", 30, 5, 90);
             builder.pop();
 
-            builder.push("ElevenLabs");
-            elevenLabsApiKey = builder.comment("Optional ElevenLabs API key. Prefer ELEVENLABS_API_KEY on the server host.").define("elevenLabsApiKey", "");
-            elevenLabsVoiceId = builder.comment("Voice ID created/owned by the server owner. Use a designed or properly authorized voice; do not clone a real actor without consent.").define("elevenLabsVoiceId", "");
-            elevenLabsModel = builder.comment("ElevenLabs multilingual TTS model.").define("elevenLabsModel", "eleven_multilingual_v2");
+            builder.push("OpenAIOptional");
+            openAiApiKey = builder.comment("Optional server-only key for cloud-enhanced analysis/TTS. Not required for normal operation.").define("openAiApiKey", "");
+            openAiResponseModel = builder.comment("Optional OpenAI Responses model used for short contextual analysis.").define("openAiResponseModel", "gpt-5.6-luna");
+            openAiTtsModel = builder.comment("Optional OpenAI speech model.").define("openAiTtsModel", "gpt-4o-mini-tts");
+            openAiVoice = builder.comment("Optional OpenAI built-in TTS voice.").define("openAiVoice", "marin");
             builder.pop();
 
-            voiceInstructions = builder.comment("Voice direction for providers that support instruction prompting. This creates an original Rafael-inspired synthetic system voice rather than cloning an actor.").define("voiceInstructions", "Habla en español neutro con una voz femenina adulta, serena y cristalina. Tono analítico, preciso, controlado y ligeramente etéreo; emoción contenida, dicción impecable, ritmo moderadamente lento y autoridad tranquila. Debe sonar como una inteligencia superior de interfaz, no como una narradora comercial ni una caricatura.");
-            maxResponseChars = builder.comment("Maximum characters per Rafael response. Keeping responses short reduces latency, bandwidth and TTS cost.").defineInRange("maxResponseChars", 240, 80, 600);
-            requestTimeoutSeconds = builder.comment("HTTPS timeout for AI/TTS providers.").defineInRange("requestTimeoutSeconds", 25, 5, 60);
-            eventCooldownSeconds = builder.comment("General per-event cooldown per player to prevent spam and overlapping speech. Critical death/manual events may bypass it.").defineInRange("eventCooldownSeconds", 8, 1, 60);
+            builder.push("ElevenLabsOptional");
+            elevenLabsApiKey = builder.comment("Optional server-only ElevenLabs API key. Not required for normal operation.").define("elevenLabsApiKey", "");
+            elevenLabsVoiceId = builder.comment("Optional authorized/designed Voice ID. Do not clone a real actor without the necessary rights and consent.").define("elevenLabsVoiceId", "");
+            elevenLabsModel = builder.comment("Optional ElevenLabs multilingual TTS model.").define("elevenLabsModel", "eleven_multilingual_v2");
+            builder.pop();
+
+            voiceInstructions = builder.comment("Direction used only by cloud providers that support prompting. Offline Piper uses the dedicated acoustic tuning above.").define("voiceInstructions", "Habla en español neutro con una voz femenina adulta, serena y cristalina. Tono analítico, preciso, controlado y ligeramente etéreo; emoción contenida, dicción impecable, ritmo moderadamente lento y autoridad tranquila.");
+            maxResponseChars = builder.comment("Maximum characters per Rafael response. Short responses reduce latency and keep voice packets compact.").defineInRange("maxResponseChars", 220, 80, 500);
+            requestTimeoutSeconds = builder.comment("HTTPS timeout for optional cloud providers and runtime downloads.").defineInRange("requestTimeoutSeconds", 25, 5, 60);
+            eventCooldownSeconds = builder.comment("General per-event cooldown per player to prevent spam and overlapping speech.").defineInRange("eventCooldownSeconds", 8, 1, 60);
 
             builder.push("Events");
             announceLogin = builder.define("announceLogin", true);
             announcePlayerDeath = builder.define("announcePlayerDeath", true);
             announceRespawn = builder.define("announceRespawn", true);
             announceLowHealth = builder.define("announceLowHealth", true);
+            announceLowFood = builder.comment("Warn once when hunger crosses into the critical range; cooldown and threshold crossing prevent spam.").define("announceLowFood", true);
             announceGamemodeChanges = builder.define("announceGamemodeChanges", true);
+            announceDimensionChanges = builder.comment("Announce dimension transitions such as Overworld -> Nether/End.").define("announceDimensionChanges", true);
             announceAdvancements = builder.define("announceAdvancements", true);
-            announceItemDrops = builder.comment("Item toss events are noisy; keep enabled only if desired. Cooldown protection still applies.").define("announceItemDrops", false);
+            announceItemDrops = builder.comment("Item toss events are noisy; disabled by default.").define("announceItemDrops", false);
             builder.pop();
             builder.pop();
         }

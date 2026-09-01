@@ -25,16 +25,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
-/** Server-side Rafael brain + speech service. No Python/localhost runtime is required. */
+/** Server-side Rafael brain + speech service. Offline voice is the default. */
 public final class RafaelService {
     private static final String OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
     private static final String OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech";
     private static final String ELEVENLABS_TTS_BASE = "https://api.elevenlabs.io/v1/text-to-speech/";
     private static final int MAX_HTTP_BODY_BYTES = 2_000_000;
     private static final int MAX_AUDIO_BYTES = 900_000;
-    private static final int AUDIO_CACHE_ENTRIES = 32;
+    private static final int AUDIO_CACHE_ENTRIES = 48;
     private static final AtomicBoolean WARNED_OPENAI_KEY = new AtomicBoolean(false);
     private static final AtomicBoolean WARNED_ELEVENLABS_KEY = new AtomicBoolean(false);
+    private static final AtomicBoolean PREWARM_STARTED = new AtomicBoolean(false);
 
     private static final ThreadFactory THREAD_FACTORY = new ThreadFactory() {
         private final AtomicInteger counter = new AtomicInteger(1);
@@ -64,6 +65,18 @@ public final class RafaelService {
 
     private RafaelService() {}
 
+    public static void prewarmVoice() {
+        if (!GreatSageConfig.SERVER.enableVoice.get() || !GreatSageConfig.SERVER.prewarmOfflineVoice.get()) return;
+        if (!PREWARM_STARTED.compareAndSet(false, true)) return;
+        EXECUTOR.execute(() -> {
+            try {
+                OfflineVoiceEngine.prepare();
+            } catch (Exception e) {
+                GreatSageMod.LOGGER.warn("Precalentamiento de voz offline no completado; Rafael volverá a intentarlo cuando necesite hablar: {}", e.toString());
+            }
+        });
+    }
+
     public static void requestSpeech(EventSnapshot snapshot, Consumer<SpeechResult> callback) {
         EXECUTOR.execute(() -> {
             SpeechResult result;
@@ -74,18 +87,19 @@ public final class RafaelService {
                 result = new SpeechResult(text, audio, emotion, audio.length > 0);
             } catch (Exception e) {
                 GreatSageMod.LOGGER.warn("Rafael no pudo procesar '{}': {}", snapshot.eventType(), e.toString(), e);
-                result = new SpeechResult(snapshot.fallbackText(), new byte[0], emotionFor(snapshot.eventType()), false);
+                result = new SpeechResult(sanitizeText(buildLocalResponse(snapshot)), new byte[0], emotionFor(snapshot.eventType()), false);
             }
             try { callback.accept(result); } catch (Exception e) { GreatSageMod.LOGGER.error("No se pudo entregar el resultado de Rafael", e); }
         });
     }
 
     private static String buildResponseText(EventSnapshot snapshot) {
-        if (!GreatSageConfig.SERVER.enableGeneratedResponses.get()) return sanitizeText(snapshot.fallbackText());
+        String local = sanitizeText(buildLocalResponse(snapshot));
+        if (!GreatSageConfig.SERVER.enableGeneratedResponses.get()) return local;
         String apiKey = openAiKey();
         if (apiKey.isBlank()) {
-            if (WARNED_OPENAI_KEY.compareAndSet(false, true)) GreatSageMod.LOGGER.warn("Rafael AI usa respuesta local porque no hay OPENAI_API_KEY/openAiApiKey configurada.");
-            return sanitizeText(snapshot.fallbackText());
+            if (WARNED_OPENAI_KEY.compareAndSet(false, true)) GreatSageMod.LOGGER.info("Rafael usa su cerebro local integrado. Una API externa es opcional y no es necesaria para voz ni funcionamiento normal.");
+            return local;
         }
         try {
             JsonObject payload = new JsonObject();
@@ -97,9 +111,48 @@ public final class RafaelService {
             String generated = extractResponseText(response);
             if (!generated.isBlank()) return sanitizeText(generated);
         } catch (Exception e) {
-            GreatSageMod.LOGGER.warn("Fallo generando análisis IA; se usa respuesta local: {}", e.toString());
+            GreatSageMod.LOGGER.warn("Fallo del análisis cloud opcional; Rafael continúa con cerebro local: {}", e.toString());
         }
-        return sanitizeText(snapshot.fallbackText());
+        return local;
+    }
+
+    private static String buildLocalResponse(EventSnapshot snapshot) {
+        String event = normalize(snapshot.eventType());
+        String detail = sanitizeLoose(snapshot.detail());
+        String fallback = sanitizeLoose(snapshot.fallbackText());
+        String player = snapshot.playerName();
+        float health = snapshot.health();
+
+        if (event.contains("prueba manual")) return localManual(snapshot, detail);
+        if (event.contains("prueba de voz")) return "Sistema vocal offline operativo. Canal acústico sincronizado; síntesis local preparada.";
+        if (event.contains("muerte")) return fallback.isBlank() ? "Alerta crítica. Firma vital perdida; causa de baja registrada para análisis." : fallback;
+        if (event.contains("salud")) return "Advertencia. Integridad vital en nivel crítico: " + oneDecimal(health) + " puntos. Curación, cobertura o retirada inmediata recomendada.";
+        if (event.contains("hambre") || event.contains("nutric")) return "Advertencia metabólica. Reservas de alimento en nivel crítico; repón nutrición antes de continuar operaciones de riesgo.";
+        if (event.contains("conex")) return "Sincronización completada. Usuario " + player + " reconocido; entorno " + friendlyDimension(snapshot.dimension()) + " enlazado y estable.";
+        if (event.contains("reapar") || event.contains("respawn")) return "Regeneración completada. Conciencia restaurada y parámetros vitales reinicializados; análisis del entorno reanudado.";
+        if (event.contains("dimensi")) return "Transición dimensional confirmada. Destino: " + friendlyDimension(snapshot.dimension()) + ". Recalibrando parámetros ambientales y de navegación.";
+        if (event.contains("modo de juego")) return fallback.isBlank() ? "Parámetros operativos reconfigurados. Nuevo modo registrado sin anomalías." : fallback;
+        if (event.contains("logro") || event.contains("hito")) return fallback.isBlank() ? "Nuevo hito registrado. Progreso del usuario actualizado correctamente." : fallback;
+        if (event.contains("objeto")) return fallback.isBlank() ? "Cambio de inventario detectado. Objeto descartado del conjunto activo." : fallback;
+        return fallback.isBlank() ? "Análisis completado. No se detectan anomalías críticas en los parámetros disponibles." : fallback;
+    }
+
+    private static String localManual(EventSnapshot snapshot, String detail) {
+        String lower = normalize(detail);
+        if (lower.contains("diagnost") || lower.contains("estado") || lower.contains("sistema")) {
+            return "Diagnóstico completado. Integridad vital: " + oneDecimal(snapshot.health()) + " de 20; entorno: " + friendlyDimension(snapshot.dimension()) + ". Subsistemas de Rafael operativos.";
+        }
+        if (lower.contains("salud") || lower.contains("vida") || lower.contains("corazon")) {
+            return "Lectura vital actual: " + oneDecimal(snapshot.health()) + " de 20 puntos. " + (snapshot.health() <= 4.0f ? "Nivel crítico; prioriza curación y retirada." : "Parámetros dentro de un margen operativo aceptable.");
+        }
+        if (lower.contains("donde") || lower.contains("dimension") || lower.contains("entorno")) {
+            return "Localización dimensional identificada: " + friendlyDimension(snapshot.dimension()) + ". Sincronización espacial estable.";
+        }
+        if (lower.contains("peligro") || lower.contains("riesgo")) {
+            return snapshot.health() <= 6.0f ? "Riesgo elevado por reserva vital reducida. Recomiendo evitar combate directo hasta recuperar integridad." : "Con los datos disponibles no detecto una condición vital crítica. Mantén vigilancia del entorno.";
+        }
+        if (detail.isBlank()) return "Consulta recibida. Subsistema analítico local disponible y listo para evaluar telemetría del jugador.";
+        return "Consulta registrada. El núcleo local no inventará información externa; puedo evaluar estado, salud, dimensión y eventos detectados en tiempo real.";
     }
 
     private static String buildEventPrompt(EventSnapshot snapshot) {
@@ -128,28 +181,53 @@ public final class RafaelService {
         String cacheKey = sha256(provider + "|" + voiceIdentity(provider) + "|" + text);
         byte[] cached = AUDIO_CACHE.get(cacheKey);
         if (cached != null) return cached.clone();
-        byte[] audio;
+
+        byte[] audio = new byte[0];
         try {
             audio = switch (provider) {
-                case "elevenlabs" -> synthesizeElevenLabs(text);
-                case "openai" -> synthesizeOpenAi(text);
-                default -> { GreatSageMod.LOGGER.warn("Proveedor TTS '{}' no reconocido. Voz desactivada para este evento.", provider); yield new byte[0]; }
+                case "offline", "piper", "local" -> OfflineVoiceEngine.synthesize(text);
+                case "openai" -> {
+                    if (openAiKey().isBlank()) {
+                        GreatSageMod.LOGGER.debug("OpenAI TTS no configurado; usando voz offline automática.");
+                        yield OfflineVoiceEngine.synthesize(text);
+                    }
+                    try { yield synthesizeOpenAi(text); }
+                    catch (Exception cloudError) {
+                        GreatSageMod.LOGGER.warn("OpenAI TTS falló; usando voz offline: {}", cloudError.toString());
+                        yield OfflineVoiceEngine.synthesize(text);
+                    }
+                }
+                case "elevenlabs" -> {
+                    if (elevenLabsKey().isBlank() || GreatSageConfig.SERVER.elevenLabsVoiceId.get().isBlank()) {
+                        GreatSageMod.LOGGER.debug("ElevenLabs no configurado; usando voz offline automática.");
+                        yield OfflineVoiceEngine.synthesize(text);
+                    }
+                    try { yield synthesizeElevenLabs(text); }
+                    catch (Exception cloudError) {
+                        GreatSageMod.LOGGER.warn("ElevenLabs TTS falló; usando voz offline: {}", cloudError.toString());
+                        yield OfflineVoiceEngine.synthesize(text);
+                    }
+                }
+                default -> {
+                    GreatSageMod.LOGGER.warn("Proveedor TTS '{}' no reconocido; usando voz offline.", provider);
+                    yield OfflineVoiceEngine.synthesize(text);
+                }
             };
         } catch (Exception e) {
-            GreatSageMod.LOGGER.warn("No se pudo generar la voz sintética de Rafael con {}: {}", provider, e.toString());
-            return new byte[0];
+            GreatSageMod.LOGGER.warn("No se pudo generar voz de Rafael; HUD/texto seguirán funcionando: {}", e.toString());
         }
-        if (audio.length > 0 && audio.length <= MAX_AUDIO_BYTES) { AUDIO_CACHE.put(cacheKey, audio.clone()); return audio; }
-        if (audio.length > MAX_AUDIO_BYTES) GreatSageMod.LOGGER.warn("Audio de Rafael descartado: {} bytes exceden el máximo de {}.", audio.length, MAX_AUDIO_BYTES);
+
+        if (audio.length > 0 && audio.length <= MAX_AUDIO_BYTES) {
+            AUDIO_CACHE.put(cacheKey, audio.clone());
+            return audio;
+        }
+        if (audio.length > MAX_AUDIO_BYTES) GreatSageMod.LOGGER.warn("Audio de Rafael descartado: {} bytes exceden el máximo de {}. Reduce maxResponseChars o aumenta velocidad.", audio.length, MAX_AUDIO_BYTES);
         return new byte[0];
     }
 
     private static byte[] synthesizeOpenAi(String text) throws Exception {
         String apiKey = openAiKey();
-        if (apiKey.isBlank()) {
-            if (WARNED_OPENAI_KEY.compareAndSet(false, true)) GreatSageMod.LOGGER.warn("Voz OpenAI desactivada: configura OPENAI_API_KEY u openAiApiKey en serverconfig.");
-            return new byte[0];
-        }
+        if (apiKey.isBlank()) return new byte[0];
         JsonObject payload = new JsonObject();
         payload.addProperty("model", GreatSageConfig.SERVER.openAiTtsModel.get());
         payload.addProperty("voice", GreatSageConfig.SERVER.openAiVoice.get());
@@ -162,21 +240,18 @@ public final class RafaelService {
     private static byte[] synthesizeElevenLabs(String text) throws Exception {
         String apiKey = elevenLabsKey();
         String voiceId = GreatSageConfig.SERVER.elevenLabsVoiceId.get().trim();
-        if (apiKey.isBlank() || voiceId.isBlank()) {
-            if (WARNED_ELEVENLABS_KEY.compareAndSet(false, true)) GreatSageMod.LOGGER.warn("Voz ElevenLabs desactivada: falta ELEVENLABS_API_KEY/elevenLabsApiKey o elevenLabsVoiceId.");
-            return new byte[0];
-        }
+        if (apiKey.isBlank() || voiceId.isBlank()) return new byte[0];
         String encodedVoiceId = URLEncoder.encode(voiceId, StandardCharsets.UTF_8).replace("+", "%20");
         String url = ELEVENLABS_TTS_BASE + encodedVoiceId + "?output_format=pcm_24000";
         JsonObject payload = new JsonObject();
         payload.addProperty("text", text);
         payload.addProperty("model_id", GreatSageConfig.SERVER.elevenLabsModel.get());
         JsonObject settings = new JsonObject();
-        settings.addProperty("stability", 0.72);
-        settings.addProperty("similarity_boost", 0.72);
-        settings.addProperty("style", 0.12);
+        settings.addProperty("stability", 0.76);
+        settings.addProperty("similarity_boost", 0.70);
+        settings.addProperty("style", 0.10);
         settings.addProperty("use_speaker_boost", true);
-        settings.addProperty("speed", 0.96);
+        settings.addProperty("speed", 0.95);
         payload.add("voice_settings", settings);
         byte[] pcm = postBinary(url, "xi-api-key", apiKey, payload, "application/octet-stream");
         return pcm16MonoToWav(pcm, 24000);
@@ -211,7 +286,7 @@ public final class RafaelService {
 
     private static HttpURLConnection openConnection(String url) throws Exception {
         URL parsed = new URL(url);
-        if (!"https".equalsIgnoreCase(parsed.getProtocol())) throw new IllegalArgumentException("Rafael solo permite endpoints HTTPS para proveedores de voz/IA.");
+        if (!"https".equalsIgnoreCase(parsed.getProtocol())) throw new IllegalArgumentException("Rafael solo permite endpoints HTTPS.");
         HttpURLConnection connection = (HttpURLConnection) parsed.openConnection();
         int timeoutMs = GreatSageConfig.SERVER.requestTimeoutSeconds.get() * 1000;
         connection.setRequestMethod("POST");
@@ -267,6 +342,9 @@ public final class RafaelService {
     }
 
     private static String voiceIdentity(String provider) {
+        if ("offline".equals(provider) || "piper".equals(provider) || "local".equals(provider)) {
+            return "daniela-high|" + GreatSageConfig.SERVER.offlineLengthScale.get() + "|" + GreatSageConfig.SERVER.offlineNoiseScale.get() + "|" + GreatSageConfig.SERVER.offlineNoiseWidth.get();
+        }
         if ("elevenlabs".equals(provider)) return GreatSageConfig.SERVER.elevenLabsVoiceId.get() + "|" + GreatSageConfig.SERVER.elevenLabsModel.get();
         return GreatSageConfig.SERVER.openAiVoice.get() + "|" + GreatSageConfig.SERVER.openAiTtsModel.get() + "|" + GreatSageConfig.SERVER.voiceInstructions.get();
     }
@@ -279,11 +357,31 @@ public final class RafaelService {
         return text;
     }
 
+    private static String sanitizeLoose(String raw) {
+        return raw == null ? "" : raw.replace('\r', ' ').replace('\n', ' ').replaceAll("\\s+", " ").trim();
+    }
+
+    private static String normalize(String raw) {
+        return sanitizeLoose(raw).toLowerCase(Locale.ROOT)
+                .replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u').replace('ü', 'u');
+    }
+
+    private static String friendlyDimension(String dimension) {
+        String value = dimension == null ? "desconocido" : dimension;
+        if (value.contains("overworld")) return "Overworld";
+        if (value.contains("the_nether")) return "Nether";
+        if (value.contains("the_end")) return "End";
+        int colon = value.indexOf(':');
+        return (colon >= 0 ? value.substring(colon + 1) : value).replace('_', ' ');
+    }
+
+    private static String oneDecimal(float value) { return String.format(Locale.ROOT, "%.1f", value); }
+
     private static String emotionFor(String eventType) {
-        String event = eventType.toLowerCase(Locale.ROOT);
-        if (event.contains("muerte") || event.contains("salud")) return "critical";
+        String event = normalize(eventType);
+        if (event.contains("muerte") || event.contains("salud") || event.contains("hambre")) return "critical";
         if (event.contains("logro") || event.contains("hito")) return "achievement";
-        if (event.contains("conex")) return "sync";
+        if (event.contains("conex") || event.contains("dimension") || event.contains("respawn") || event.contains("reapar")) return "sync";
         return "analytical";
     }
 
@@ -297,16 +395,16 @@ public final class RafaelService {
     }
 
     public static String statusSummary() {
-        String provider = GreatSageConfig.SERVER.ttsProvider.get();
+        String provider = GreatSageConfig.SERVER.ttsProvider.get().trim().toLowerCase(Locale.ROOT);
         boolean aiKey = !openAiKey().isBlank();
-        boolean voiceReady = switch (provider.trim().toLowerCase(Locale.ROOT)) {
-            case "openai" -> aiKey;
-            case "elevenlabs" -> !elevenLabsKey().isBlank() && !GreatSageConfig.SERVER.elevenLabsVoiceId.get().isBlank();
-            default -> false;
-        };
-        return "Arquitectura server-native | IA=" + (GreatSageConfig.SERVER.enableGeneratedResponses.get() ? (aiKey ? "lista" : "fallback local") : "local")
-                + " | Voz=" + (GreatSageConfig.SERVER.enableVoice.get() ? (voiceReady ? provider + " lista" : provider + " sin configurar") : "desactivada")
-                + " | Python/localhost=no requerido";
+        String voice;
+        if (!GreatSageConfig.SERVER.enableVoice.get()) voice = "desactivada";
+        else if ("offline".equals(provider) || "piper".equals(provider) || "local".equals(provider)) voice = "offline=" + OfflineVoiceEngine.statusSummary();
+        else if ("openai".equals(provider) && aiKey) voice = "OpenAI configurada + fallback offline";
+        else if ("elevenlabs".equals(provider) && !elevenLabsKey().isBlank() && !GreatSageConfig.SERVER.elevenLabsVoiceId.get().isBlank()) voice = "ElevenLabs configurada + fallback offline";
+        else voice = provider + " no configurada -> offline " + OfflineVoiceEngine.statusSummary();
+        return "Rafael v1.2 | Cerebro=" + (GreatSageConfig.SERVER.enableGeneratedResponses.get() && aiKey ? "cloud opcional + local" : "local integrado")
+                + " | Voz=" + voice + " | Python/API key=NO requeridos";
     }
 
     public record EventSnapshot(String playerName, String eventType, String detail, String fallbackText, float health, String dimension) {}
