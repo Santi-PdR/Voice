@@ -1,89 +1,99 @@
 # Great Sage Voice (Raphael)
 
-Forge 1.20.1 companion mod inspired by the analytical presence of Raphael / Gran Sabio: compact cinematic HUD, local event analysis and self-managed offline neural speech for singleplayer and dedicated servers.
+Forge 1.20.1 companion mod for Raphael / Gran Sabio: automatic Spanish/English language selection, cinematic HUD, local analytical reactions and self-managed offline speech.
 
-## v1.3.0 — automatic Spanish / English Raphael
+## v1.4.0 — authorized local voice identity
 
-Raphael now follows the **language selected by each Minecraft client**.
+v1.4 adds an optional **local OpenVoice V2 ONNX tone-conversion layer** on top of the existing Piper speech pipeline.
 
-- Any Minecraft locale beginning with `es` -> Spanish text + Spanish neural voice.
-- All other locales -> English text + English neural voice.
-- Language changes are detected while connected; no reconnect or config edit is required.
-- A multiplayer server may speak Spanish to one player and English to another at the same time.
-
-The client sends only a tiny bounded language code to the Forge server. The server owns analysis and speech synthesis and sends back localized text + bounded WAV audio.
-
-## Zero-account voice architecture
-
-Default operation still requires **no API key, paid account, Python, FastAPI, FFmpeg service, localhost server or persistent terminal**.
-
-The first time a language is needed, the server downloads and caches:
-
-- the pinned Piper runtime for the host OS;
-- Spanish: `es_AR-daniela-high` (high quality, 22.05 kHz);
-- English: `en_US-lessac-high` (high quality, 22.05 kHz).
-
-Only languages actually used by connected players are downloaded. The Piper runtime is shared by both profiles. Model SHA-256 values are pinned before a downloaded ONNX model is accepted.
-
-Cache location:
+Runtime flow:
 
 ```text
-<game-or-server-dir>/great_sage_voice/offline_voice/
+Minecraft event
+ -> bilingual local Raphael brain
+ -> Piper ES/EN base speech
+ -> authorized OpenVoice tone transfer (when locally enabled)
+ -> bounded WAV
+ -> Forge S2C
+ -> client voice + Great Sage HUD
 ```
 
-After installation, normal synthesis is local and can continue without a TTS provider.
+No persistent Python process, FastAPI backend, localhost server, paid TTS account or API key is required.
 
-## Voice identity: closer to the Great Sage without pretending
+### Authorization stays local
 
-The default profiles are **original/open neural voices tuned to evoke Raphael's character**, not copies of the real dub performers. v1.3 improves the character impression with:
-
-- separate Spanish and English cadence tuning;
-- lower synthesis randomness for controlled delivery;
-- shorter sentence silences;
-- conservative loudness normalization;
-- subtle speech-presence enhancement;
-- dual short acoustic reflections for the internal/system-like aura;
-- a quieter layered activation signature;
-- no pitch shift or artificial slowdown after synthesis.
-
-### Authorized custom Raphael voice models
-
-If you have a properly licensed/authorized Piper-compatible voice model, the mod can use it automatically without code changes.
-
-Place server-side files here:
+The public repository intentionally does **not** contain actor-specific reference URLs or recordings. Authorized installations may contain these local files:
 
 ```text
-great_sage_voice/custom_voice/es.onnx
-great_sage_voice/custom_voice/es.onnx.json
-
-great_sage_voice/custom_voice/en.onnx
-great_sage_voice/custom_voice/en.onnx.json
+<game-dir>/great_sage_voice/authorized_voice/authorization.accepted
+<game-dir>/great_sage_voice/authorized_voice/sources.json
 ```
 
-With `preferCustomVoiceModels=true`, those files take priority over built-in Daniela/Lessac profiles. This is the supported path for an actual licensed character voice model.
+When both are present and `enableAuthorizedVoiceClone=true`, the server automatically:
+
+1. prepares Piper for the player's language;
+2. downloads the pinned OpenVoice V2 ONNX encoder/converter models;
+3. acquires the operator-authorized public reference sources listed in the local manifest;
+4. decodes and resamples the references locally;
+5. extracts a target tone embedding;
+6. caches that compact embedding;
+7. transfers the target timbre onto future Raphael speech locally.
+
+The reference sources themselves are not committed to Git. This keeps the public code generic and makes the authorization/source selection installation-specific.
+
+If any cloning stage is unavailable, Raphael automatically falls back to the normal Piper voice instead of breaking gameplay.
+
+## Automatic language
+
+Raphael follows each Minecraft client's selected language:
+
+- any locale starting with `es` -> Spanish response + Spanish base voice + Spanish authorized tone profile;
+- other locales -> English response + English base voice + English authorized tone profile.
+
+Language changes are detected while connected. One multiplayer server can speak Spanish to one player and English to another simultaneously.
+
+## Base offline voices
+
+The fallback/base layer remains self-managed Piper:
+
+- Spanish: `es_AR-daniela-high`;
+- English: `en_US-lessac-high`.
+
+Only the language actually requested by a player is prepared. These base voices provide stable pronunciation and restrained Great Sage cadence before optional tone transfer.
+
+## Zero-manual runtime design
+
+The distributable v1.4 JAR bundles its Java inference dependencies with Forge Jar-in-Jar:
+
+- Microsoft ONNX Runtime CPU;
+- JLayer MP3 decoder.
+
+The local authorized-reference manager can also fetch its pinned `yt-dlp` executable when a configured media source requires it. `yt-dlp` is invoked only for acquisition and exits; it is not a background service.
+
+Downloaded/cached runtime data lives under:
+
+```text
+<game-dir>/great_sage_voice/
+```
 
 ## Local analytical core
 
-Cloud AI is optional. Without it, Raphael can still react and answer in Spanish or English using real Minecraft telemetry:
+Cloud AI remains optional. The built-in core reacts in Spanish/English using real Minecraft telemetry:
 
-- login synchronization;
-- death and respawn;
+- login and language synchronization;
+- death / respawn;
 - post-damage critical health;
-- hunger threshold crossing;
+- critical hunger;
 - low-air / drowning risk;
 - game mode changes;
 - dimension transitions;
 - advancements;
 - optional item tosses;
-- health/max health;
-- hunger;
-- armor;
-- XP level;
-- dimension;
-- approximate coordinates;
-- basic immediate-risk diagnosis.
+- health/max health, food, armor and XP;
+- dimension and approximate coordinates;
+- immediate-risk diagnostics.
 
-Responses created asynchronously are sequence-checked. If a newer event arrives first, an older delayed response is discarded instead of overwriting the current warning.
+Asynchronous results are sequence-checked so a delayed old event cannot overwrite a newer warning.
 
 ## Commands
 
@@ -96,42 +106,49 @@ Responses created asynchronously are sequence-checked. If a newer event arrives 
 /rafael test run a full diagnostic
 ```
 
-Command feedback follows the player's detected language.
+`/rafael status` exposes the base voice state and the authorized tone-conversion state independently.
 
-## HUD v1.3
+## Voice character
 
-- `RAFAEL // GRAN SABIO` in Spanish;
-- `RAPHAEL // GREAT SAGE` in English;
-- localized ANALYSIS / CRITICAL / SYNC / MILESTONE states;
-- visible ES / EN language link;
-- `VOZ LOCAL // ES` or `LOCAL VOICE // EN` indicator;
-- compact screen-safe layout;
-- dynamic wrapping and lifetime;
-- typewriter reveal and cursor;
-- processing bus animation;
-- real fade-in/fade-out;
-- runic core, particles and emotion accents;
-- configurable opacity, scale and line limit.
-
-## Audio client controls
-
-`great_sage_voice-client.toml` includes:
+Piper tuning is deliberately restrained before conversion:
 
 ```toml
-voiceVolume = 1.0
-voiceAuraIntensity = 0.11
-voicePresence = 0.10
-uiSoundVolume = 0.36
-hudOpacity = 0.94
+offlineLengthScale = 1.07
+offlineEnglishLengthScale = 1.04
+offlineNoiseScale = 0.42
+offlineNoiseWidth = 0.48
+authorizedVoiceCloneStrength = 0.96
 ```
 
-Keep aura/presence conservative; extreme values intentionally remain capped to avoid metallic distortion.
+The client then applies only conservative presence/aura processing. There is no artificial pitch shift intended to fake identity; identity comes from the authorized target embedding when that mode is active.
 
-## Server / singleplayer
+## HUD
 
-Singleplayer uses Minecraft's integrated server and therefore exercises the same language/voice architecture as multiplayer.
+The HUD remains localized and screen-safe:
 
-Dedicated server: install the same v1.3 JAR on server and clients. The server downloads models and synthesizes speech; clients receive only their own localized text/audio packets.
+Spanish:
+
+```text
+RAFAEL // GRAN SABIO
+ANÁLISIS / CRÍTICO / SINCRONÍA / HITO
+VOZ LOCAL // ES
+```
+
+English:
+
+```text
+RAPHAEL // GREAT SAGE
+ANALYSIS / CRITICAL / SYNC / MILESTONE
+LOCAL VOICE // EN
+```
+
+It includes dynamic wrapping/lifetime, typewriter reveal, cursor, processing bus, fade/easing, runic core, particles, emotion accents and configurable scale/opacity/audio levels.
+
+## Singleplayer and dedicated servers
+
+Singleplayer runs an integrated Minecraft server and exercises the same pipeline as multiplayer.
+
+For dedicated servers, install the same v1.4 JAR on server and clients. Voice preparation/conversion runs server-side; clients receive only localized text and bounded WAV for their own responses.
 
 ## Build
 
@@ -139,17 +156,12 @@ Dedicated server: install the same v1.3 JAR on server and clients. The server do
 - Forge 47.2.20
 - Java 17 toolchain
 - Gradle 8.3
+- ONNX Runtime 1.24.3
 
 ```powershell
 .\gradlew.bat clean build --no-daemon
 ```
 
-GitHub Actions validates the same Java 17 / Gradle 8.3 build path.
+The distributable artifact is the Jar-in-Jar JAR; the `*-slim.jar` build artifact is diagnostic and does not contain the inference libraries.
 
-## Local deploy target used for testing
-
-```text
-C:\Users\santi\AppData\Roaming\.sklauncher\instances\test-1\mods
-```
-
-See `docs/VOICE_SETUP.md`, `THIRD_PARTY_NOTICES.md` and `SECURITY.md` for details.
+See `docs/VOICE_SETUP.md`, `THIRD_PARTY_NOTICES.md`, `SECURITY.md` and the changelog for details.

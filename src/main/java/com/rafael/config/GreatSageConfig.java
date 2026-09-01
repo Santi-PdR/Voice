@@ -13,6 +13,8 @@ public final class GreatSageConfig {
         public final ForgeConfigSpec.BooleanValue autoInstallOfflineVoice;
         public final ForgeConfigSpec.BooleanValue prewarmOfflineVoice;
         public final ForgeConfigSpec.BooleanValue preferCustomVoiceModels;
+        public final ForgeConfigSpec.BooleanValue enableAuthorizedVoiceClone;
+        public final ForgeConfigSpec.DoubleValue authorizedVoiceCloneStrength;
         public final ForgeConfigSpec.DoubleValue offlineLengthScale;
         public final ForgeConfigSpec.DoubleValue offlineEnglishLengthScale;
         public final ForgeConfigSpec.DoubleValue offlineNoiseScale;
@@ -44,19 +46,21 @@ public final class GreatSageConfig {
             builder.push("Great Sage / Raphael - Server Native AI and Voice");
             enableAI = builder.comment("Master switch for automatic Raphael reactions. Diagnostic commands remain available.").define("enableAI", true);
             enableGeneratedResponses = builder.comment("Optional cloud-enhanced analysis. Without a key Raphael uses the bilingual local analytical core.").define("enableGeneratedResponses", true);
-            enableVoice = builder.comment("Enable speech. Default is local Piper TTS with no account/API key/Python/terminal.").define("enableVoice", true);
+            enableVoice = builder.comment("Enable speech. Default path is local and requires no paid account/API key/Python service/terminal.").define("enableVoice", true);
             fallbackLanguage = builder.comment("Fallback when client language has not synchronized yet. Values beginning with es use Spanish; everything else uses English.").define("fallbackLanguage", "en");
             ttsProvider = builder.comment("Voice provider: offline (recommended/default), openai or elevenlabs. Cloud failure automatically falls back to offline.").define("ttsProvider", "offline");
 
             builder.push("OfflineVoice");
             autoInstallOfflineVoice = builder.comment("Automatically download Piper and only the high-quality language model actually needed by connected players.").define("autoInstallOfflineVoice", true);
             prewarmOfflineVoice = builder.comment("Prepare a player's voice model asynchronously as soon as the client language is known.").define("prewarmOfflineVoice", true);
-            preferCustomVoiceModels = builder.comment("If great_sage_voice/custom_voice/es.onnx or en.onnx plus matching .onnx.json exist, use those local models before built-in profiles. Intended for properly licensed/authorized character voice models.").define("preferCustomVoiceModels", true);
-            offlineLengthScale = builder.comment("Spanish Piper length scale. Higher = slower. Tuned for controlled Great Sage cadence.").defineInRange("offlineLengthScale", 1.08, 0.75, 1.60);
-            offlineEnglishLengthScale = builder.comment("English Piper length scale. Lessac has a different natural cadence from Daniela, so it is tuned separately.").defineInRange("offlineEnglishLengthScale", 1.05, 0.75, 1.60);
-            offlineNoiseScale = builder.comment("Generator variation. Lower values sound more controlled/systematic.").defineInRange("offlineNoiseScale", 0.44, 0.10, 1.20);
-            offlineNoiseWidth = builder.comment("Phoneme-width variation. Lower values reduce expressive randomness.").defineInRange("offlineNoiseWidth", 0.50, 0.10, 1.20);
-            offlineSynthesisTimeoutSeconds = builder.comment("Maximum local synthesis time after the model is ready.").defineInRange("offlineSynthesisTimeoutSeconds", 30, 5, 90);
+            preferCustomVoiceModels = builder.comment("If great_sage_voice/custom_voice/es.onnx or en.onnx plus matching .onnx.json exist, use those local models before built-in profiles.").define("preferCustomVoiceModels", true);
+            enableAuthorizedVoiceClone = builder.comment("Enable local OpenVoice V2 ONNX tone transfer when this installation contains its operator-local authorization.accepted marker and sources.json manifest. The public mod does not ship actor references.").define("enableAuthorizedVoiceClone", true);
+            authorizedVoiceCloneStrength = builder.comment("How strongly the authorized target tone embedding replaces the Piper base tone. 0 keeps Piper; 1 uses the full target identity. Values above 1 are intentionally capped and may create artifacts.").defineInRange("authorizedVoiceCloneStrength", 0.96, 0.0, 1.20);
+            offlineLengthScale = builder.comment("Spanish Piper length scale. Higher = slower. Tuned as Raphael's measured base cadence before tone conversion.").defineInRange("offlineLengthScale", 1.07, 0.75, 1.60);
+            offlineEnglishLengthScale = builder.comment("English Piper length scale, tuned separately for the same restrained character cadence.").defineInRange("offlineEnglishLengthScale", 1.04, 0.75, 1.60);
+            offlineNoiseScale = builder.comment("Generator variation. Lower values sound more controlled/systematic.").defineInRange("offlineNoiseScale", 0.42, 0.10, 1.20);
+            offlineNoiseWidth = builder.comment("Phoneme-width variation. Lower values reduce expressive randomness.").defineInRange("offlineNoiseWidth", 0.48, 0.10, 1.20);
+            offlineSynthesisTimeoutSeconds = builder.comment("Maximum local Piper synthesis time after the model is ready.").defineInRange("offlineSynthesisTimeoutSeconds", 30, 5, 90);
             builder.pop();
 
             builder.push("OptionalCloudEnhancement");
@@ -70,7 +74,7 @@ public final class GreatSageConfig {
             voiceInstructions = builder.comment("Character direction for optional promptable providers. Language is selected dynamically per player.").define("voiceInstructions", "Adult feminine analytical intelligence. Calm, crystalline, exact, emotionally restrained, protective authority, measured cadence, subtle ethereal presence, never theatrical or commercial.");
             builder.pop();
 
-            maxResponseChars = builder.comment("Maximum characters per response. Compact speech reduces latency, overlap and packet size.").defineInRange("maxResponseChars", 200, 80, 420);
+            maxResponseChars = builder.comment("Maximum characters per response. Compact speech reduces latency, overlap and packet size.").defineInRange("maxResponseChars", 190, 80, 420);
             requestTimeoutSeconds = builder.comment("HTTPS timeout for optional providers and first-time downloads.").defineInRange("requestTimeoutSeconds", 25, 5, 60);
             eventCooldownSeconds = builder.comment("Per-player/per-event cooldown used with stale-response suppression.").defineInRange("eventCooldownSeconds", 8, 1, 60);
 

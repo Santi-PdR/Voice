@@ -1,52 +1,64 @@
 # Changelog
 
+## 1.4.0 - Automatic authorized Raphael tone cloning
+
+### Voice identity
+
+- Added local OpenVoice V2 ONNX tone conversion after bilingual Piper synthesis.
+- Added operator-local authorization gate: cloning activates only when `great_sage_voice/authorized_voice/authorization.accepted` and `sources.json` are present.
+- Actor/source URLs are intentionally not committed to the public repository.
+- Added automatic target-tone embedding extraction and disk cache.
+- Added configurable `authorizedVoiceCloneStrength` with conservative default.
+- Conversion failure degrades to the existing Piper speech instead of breaking HUD/events.
+- Base Spanish/English cadence/noise values were tightened before tone conversion.
+
+### Automatic source acquisition
+
+- Added local authorized source manifest support for direct WAV/MP3 references.
+- Added pinned automatic yt-dlp acquisition for media references on Windows x64/Linux x64.
+- yt-dlp is invoked only during reference acquisition and exits; no persistent service is created.
+- Added JLayer MP3 decoding in-process; no FFmpeg service or manual conversion is required.
+- Added reference resampling, mono conversion, segmentation and multi-sample embedding averaging.
+
+### Local inference
+
+- Added quantized OpenVoice reference encoder + tone converter model bootstrap with pinned SHA-256 checks.
+- Added Java implementation of OpenVoice magnitude-spectrogram preprocessing (22.05 kHz, Hann STFT, FFT 1024, hop 256, reflect padding).
+- Added ONNX Runtime CPU inference and bounded postprocessing.
+- Added source/target embedding caches to reduce repeated inference cost.
+- Capped conversion input length and download sizes for predictable resource use.
+
+### Packaging and operations
+
+- Bundled ONNX Runtime 1.24.3 and JLayer 1.0.1 with Forge Jar-in-Jar.
+- `jar` now produces a `-slim` diagnostic artifact while `jarJar` produces the distributable JAR.
+- CI uploads only the distributable bundled artifact.
+- `/rafael status` now reports base TTS and authorized tone-transfer state separately.
+- Version bumped to 1.4.0.
+
 ## 1.3.0 - Bilingual Great Sage identity pass
 
 ### Language architecture
 
 - Added client -> server Minecraft language synchronization over bounded Forge networking.
-- Spanish Minecraft locales now receive Spanish text + `es_AR-daniela-high` speech.
+- Spanish Minecraft locales receive Spanish text + `es_AR-daniela-high` speech.
 - English/other locales receive English text + `en_US-lessac-high` speech.
 - Language changes are detected while connected.
 - Multiplayer supports different Raphael languages per player simultaneously.
 - Login narration waits briefly for client language synchronization before falling back.
 
-### Offline voice
+### Offline voice and presentation
 
 - Reworked Piper manager for multiple language profiles sharing one runtime.
-- Downloads only the neural model actually needed by connected players.
-- Added pinned SHA-256 validation for English Lessac High in addition to Spanish Daniela High.
-- Added separate Spanish/English cadence tuning.
-- Reduced default inference randomness for a more controlled Great Sage delivery.
-- Added automatic v1.2 Spanish-cache migration.
-- Added server-side authorized custom-model override support at `great_sage_voice/custom_voice/{es,en}.onnx`.
+- Added pinned voice SHA-256 validation, separate cadence tuning and v1.2 cache migration.
+- Added optional authorized custom Piper model override support.
+- Added client normalization/presence, dual acoustic aura, localized HUD states, ES/EN indicator, processing bus and HUD opacity.
 
-### Character presentation
+### Analytical core/network
 
-- Added conservative client loudness normalization.
-- Added configurable speech-presence enhancement.
-- Upgraded acoustic aura from one reflection to a restrained dual-reflection system.
-- Added click-safe short fades to processed PCM speech.
-- Refined activation/typewriter levels.
-- HUD title, state labels and voice indicators now localize to Spanish/English.
-- Added ES/EN language indicator, processing bus animation, response-lifetime line and typewriter cursor.
-- Added configurable HUD opacity.
-
-### Analytical core
-
-- Expanded local telemetry with max health, food, armor, XP level and coordinates.
-- Manual diagnostics now answer health, hunger, location and immediate-risk questions in both languages.
-- Added low-air / drowning-risk threshold reaction.
-- Added stale asynchronous response suppression: a delayed old analysis can no longer overwrite a newer event.
-- Preserved post-damage health snapshots for critical warnings.
-
-### Network and operations
-
-- Network protocol upgraded to v3.
-- Added bounded C2S language packet and language metadata in S2C speech packet.
-- Increased localized voice cache capacity to 64 entries.
-- Runtime cache added to `.gitignore`.
-- Version bumped to 1.3.0.
+- Expanded telemetry with max health, food, armor, XP, coordinates and low-air risk.
+- Added stale asynchronous response suppression.
+- Network protocol upgraded to v3 with bounded C2S language sync and language metadata in S2C speech.
 
 ## 1.2.0 - Self-managed offline Raphael voice
 

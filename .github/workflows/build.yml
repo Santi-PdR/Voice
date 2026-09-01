@@ -29,11 +29,12 @@ jobs:
       - name: Build Forge mod
         run: gradle clean build --no-daemon --stacktrace
 
-      - name: Upload JAR
+      - name: Upload distributable JAR
         uses: actions/upload-artifact@v4
         with:
           name: great-sage-voice-${{ github.sha }}
           path: |
             build/libs/*.jar
             !build/libs/*-sources.jar
+            !build/libs/*-slim.jar
           if-no-files-found: error

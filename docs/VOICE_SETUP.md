@@ -1,44 +1,55 @@
-# Voice setup — v1.3.0
+# Voice setup — v1.4.0
 
-## Default: no setup required
+## Normal operation
 
-Raphael uses self-managed offline Piper speech by default. No provider account/API key/Python/FastAPI/localhost service or persistent terminal is required.
+Raphael is self-managed. No provider account/API key/Python/FastAPI/localhost service or persistent terminal is required.
 
-## Automatic language selection
+The server selects Spanish or English from each Minecraft client's locale and prepares only the required base voice.
 
-The client sends its selected Minecraft language to the Forge server through the mod channel.
+## Authorized tone-conversion mode
 
-- `es_*` locales -> Spanish response text + Spanish voice.
-- all other locales -> English response text + English voice.
+v1.4 can locally transfer an authorized target voice identity with OpenVoice V2 ONNX.
 
-The client resends the language when it changes, so switching Minecraft language while connected updates Raphael automatically.
-
-Use:
+The public repository deliberately does not contain actor-specific sources. An authorized installation is enabled by two operator-local files:
 
 ```text
-/rafael language
+<game-dir>/great_sage_voice/authorized_voice/authorization.accepted
+<game-dir>/great_sage_voice/authorized_voice/sources.json
 ```
 
-to confirm what the server currently sees.
+The deploy/bootstrap command for an authorized installation can create those files automatically. After that, Minecraft handles the remaining preparation by itself.
 
-## First use and cache
+When a language is first needed the server automatically:
 
-The Piper executable is shared. Voice models are downloaded on demand:
+1. prepares/downloads Piper and the corresponding ES/EN base voice;
+2. downloads the pinned OpenVoice quantized encoder/converter;
+3. acquires the authorized references listed in the local manifest;
+4. downloads pinned yt-dlp only when a configured media source requires it;
+5. decodes WAV/MP3 in-process;
+6. resamples references to the OpenVoice 22.05 kHz pipeline;
+7. extracts/averages the target speaker embedding;
+8. stores the embedding cache locally;
+9. converts future Raphael speech locally.
+
+Nothing needs to remain open after the game starts.
+
+## Runtime folders
 
 ```text
-Spanish: es_AR-daniela-high
-English: en_US-lessac-high
+<game-dir>/great_sage_voice/offline_voice/       # Piper runtime/base models
+<game-dir>/great_sage_voice/authorized_voice/    # OpenVoice, references, embeddings, acquisition tools
 ```
 
-Each high-quality model is roughly 114 MB. A server with only Spanish players does not need the English model and vice versa.
+These runtime folders are ignored by Git.
 
-Cache:
+## Language
 
 ```text
-<game-or-server-dir>/great_sage_voice/offline_voice/
+es_* -> Spanish text + Daniela base + authorized ES target tone
+everything else -> English text + Lessac base + authorized EN target tone
 ```
 
-v1.3 automatically migrates the valid Spanish cache layout from v1.2 when possible.
+Use `/rafael language` after changing Minecraft's language to verify synchronization.
 
 ## Tests
 
@@ -50,54 +61,42 @@ v1.3 automatically migrates the valid Spanish cache layout from v1.2 when possib
 /rafael test run a complete diagnostic
 ```
 
-## Character tuning
+`/rafael status` reports both the base voice and authorized tone state. During first preparation states may show `pending`, `preparing` or `downloading`; once the target embedding is cached it should report the authorized profile as ready.
 
-Server defaults:
+## Server defaults
 
 ```toml
 ttsProvider = "offline"
 autoInstallOfflineVoice = true
 prewarmOfflineVoice = true
 preferCustomVoiceModels = true
-offlineLengthScale = 1.08
-offlineEnglishLengthScale = 1.05
-offlineNoiseScale = 0.44
-offlineNoiseWidth = 0.50
+enableAuthorizedVoiceClone = true
+authorizedVoiceCloneStrength = 0.96
+offlineLengthScale = 1.07
+offlineEnglishLengthScale = 1.04
+offlineNoiseScale = 0.42
+offlineNoiseWidth = 0.48
 ```
 
-Client defaults:
+The clone-strength default aims for strong identity transfer while leaving some source stability. If tone conversion fails, the same response is still delivered with the Piper base voice.
 
-```toml
-voiceVolume = 1.0
-voiceAuraIntensity = 0.11
-voicePresence = 0.10
-uiSoundVolume = 0.36
-```
+## Client processing
 
-The goal is restrained, feminine, analytical, precise delivery with a subtle internal/system presence. The default open profiles are not represented as recordings or clones of the franchise's real voice performers.
+The client keeps its existing conservative voice aura/presence layer. Those effects are deliberately mild; target identity is created server-side by OpenVoice rather than by pitch-shifting the final WAV.
 
-## Properly authorized custom character voice
+## Existing custom Piper models
 
-The mod supports Piper-compatible custom models without recompilation:
+The v1.3 custom-model path is still supported:
 
 ```text
-<game-or-server-dir>/great_sage_voice/custom_voice/es.onnx
-<game-or-server-dir>/great_sage_voice/custom_voice/es.onnx.json
-
-<game-or-server-dir>/great_sage_voice/custom_voice/en.onnx
-<game-or-server-dir>/great_sage_voice/custom_voice/en.onnx.json
+great_sage_voice/custom_voice/es.onnx
+great_sage_voice/custom_voice/es.onnx.json
+great_sage_voice/custom_voice/en.onnx
+great_sage_voice/custom_voice/en.onnx.json
 ```
 
-When `preferCustomVoiceModels=true`, a valid custom pair takes priority for that language. Keep custom models server-side; the server sends only generated WAV to clients.
+A valid custom Piper model becomes the base voice. Authorized OpenVoice conversion may then operate on top of that base when enabled.
 
-Only use models you are permitted to use and distribute/operate.
+## Dedicated server
 
-## Dedicated servers
-
-Install the same v1.3 mod on the Forge server and clients. Different connected players can receive different languages simultaneously. The dedicated host performs TTS and clients never need the ONNX models.
-
-Outbound HTTPS is needed only for first-time automatic downloads of the Piper runtime/model files that are not already cached.
-
-## Optional cloud paths
-
-OpenAI and ElevenLabs remain optional compatibility/enhancement paths. If selected but unavailable/unconfigured, the mod automatically falls back to the correct offline language voice.
+Install the same v1.4 bundled JAR on server and clients. The server performs base synthesis/tone conversion and sends only bounded localized WAV speech to each target player. Clients do not need actor references or target embeddings.

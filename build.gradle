@@ -11,6 +11,10 @@ base {
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 
+// ONNX Runtime + JLayer must travel with the mod so the player/server does not
+// need to install Java libraries manually. Forge Jar-in-Jar loads them safely.
+jarJar.enable()
+
 minecraft {
     mappings channel: mapping_channel, version: mapping_version
     copyIdeResources = true
@@ -41,10 +45,21 @@ minecraft {
 }
 
 repositories {
+    mavenCentral()
 }
 
 dependencies {
     minecraft "net.minecraftforge:forge:${forge_version}"
+
+    minecraftLibrary "com.microsoft.onnxruntime:onnxruntime:1.24.3"
+    minecraftLibrary "javazoom:jlayer:1.0.1"
+
+    jarJar(group: 'com.microsoft.onnxruntime', name: 'onnxruntime', version: '[1.24.3,1.25)') {
+        jarJar.pin(it, '1.24.3')
+    }
+    jarJar(group: 'javazoom', name: 'jlayer', version: '[1.0.1,1.1)') {
+        jarJar.pin(it, '1.0.1')
+    }
 }
 
 tasks.named('processResources', ProcessResources).configure {
@@ -63,4 +78,18 @@ tasks.named('processResources', ProcessResources).configure {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+}
+
+// The normal jar is kept as a slim diagnostic artifact; the distributable jar
+// is the Jar-in-Jar output containing ONNX Runtime and JLayer.
+tasks.named('jar', Jar).configure {
+    archiveClassifier = 'slim'
+}
+
+tasks.named('jarJar').configure {
+    archiveClassifier = ''
+}
+
+tasks.named('build').configure {
+    dependsOn tasks.named('jarJar')
 }

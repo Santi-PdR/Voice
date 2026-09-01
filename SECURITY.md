@@ -1,48 +1,58 @@
 # Security policy
 
-## Default offline mode
+## Default local architecture
 
-Great Sage Voice 1.3 does not require provider credentials. The Forge server/integrated server downloads pinned offline runtime/model assets from fixed HTTPS upstream locations and caches them locally.
+Great Sage Voice 1.4 does not require provider credentials. The Forge server/integrated server performs analysis, base TTS and optional authorized tone conversion locally.
 
 Security controls include:
 
-- fixed Piper release/model locations;
-- pinned SHA-256 validation for built-in ONNX models;
-- minimum download-size checks;
-- archive path-traversal protection;
-- bounded audio packets;
-- bounded client-language packets;
-- synthesis and downloads outside the Minecraft main thread;
+- fixed Piper runtime/model locations;
+- pinned SHA-256 validation for built-in Piper voice models;
+- pinned SHA-256 validation for quantized OpenVoice ONNX models;
+- pinned yt-dlp release/checksum for supported automatic media acquisition;
+- HTTPS-only authorized source URLs;
+- minimum/maximum download-size checks;
+- safe archive extraction/path traversal protection;
+- bounded language and speech network payloads;
+- voice preparation outside the Minecraft main thread;
+- maximum OpenVoice conversion duration;
 - stale asynchronous response suppression;
-- no arbitrary client-side audio URL downloads.
+- no arbitrary client-side audio downloads.
 
-Downloaded runtime/models live under:
+## Authorization boundary
 
-```text
-great_sage_voice/offline_voice/
-```
+The public repository does not contain actor-specific reference URLs, reference recordings or extracted actor embeddings.
 
-## Language synchronization
-
-Clients send only their Minecraft language identifier through the mod's C2S channel. It is length-bounded, normalized to Spanish/English behavior and contains no credentials or private configuration.
-
-## Custom voice models
-
-Optional custom Piper-compatible models may be placed under:
+Authorized tone conversion activates only when the server/integrated-server installation contains both:
 
 ```text
-great_sage_voice/custom_voice/
+great_sage_voice/authorized_voice/authorization.accepted
+great_sage_voice/authorized_voice/sources.json
 ```
 
-These files remain on the server/integrated-server machine. They are not uploaded by the mod and are not sent to clients; only generated bounded WAV speech is transmitted.
+The source manifest is installation-local and ignored by Git through the runtime-directory ignore rule. The mod treats its presence as an operator-controlled authorization/configuration boundary; the server owner remains responsible for ensuring the referenced audio and voice use are actually authorized.
 
-Server owners are responsible for ensuring custom voice models are authorized/licensed for their use.
+References, OpenVoice weights and extracted target embeddings remain local under:
 
-## Optional API keys
+```text
+great_sage_voice/authorized_voice/
+```
+
+Only generated bounded WAV speech is sent to clients. Source recordings and speaker embeddings are never sent through Forge networking.
+
+## Failure isolation
+
+Authorized tone conversion is optional. A failed reference download, MP3 decode, ONNX model load or inference pass does not stop the server or remove the HUD: the speech pipeline falls back to the normal offline Piper voice for that response.
+
+## Java dependencies
+
+ONNX Runtime and JLayer are bundled using Forge Jar-in-Jar instead of requiring users to install jars manually. The distributable artifact is the bundled Jar-in-Jar output; the `*-slim.jar` artifact is not intended for normal installation.
+
+## Optional cloud providers
 
 OpenAI/ElevenLabs remain optional enhancement providers. If used, keep keys server-side only. Prefer server environment variables; never place credentials in Java source, resources, Git commits, client config, screenshots/logs or chat commands.
 
-The S2C speech packet contains localized text, emotion/state metadata, language metadata and generated WAV bytes only. Provider credentials are never transmitted to clients.
+The S2C packet contains localized text, emotion/state metadata, language metadata and generated WAV bytes only. Provider credentials are never transmitted to clients.
 
 ## Reporting
 

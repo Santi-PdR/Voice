@@ -17,7 +17,7 @@ public final class GreatSageMod {
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     public GreatSageMod() {
-        LOGGER.info("Initializing Great Sage Voice / Raphael v1.3 (Forge 1.20.1, bilingual server-native architecture)");
+        LOGGER.info("Initializing Great Sage Voice / Raphael v1.4 (Forge 1.20.1, bilingual local voice-clone architecture)");
         ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, GreatSageConfig.SERVER_SPEC, "great_sage_voice-server.toml");
         ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, GreatSageClientConfig.CLIENT_SPEC, "great_sage_voice-client.toml");
         FMLJavaModLoadingContext.get().getModEventBus().addListener(this::setup);
@@ -26,7 +26,7 @@ public final class GreatSageMod {
     private void setup(final FMLCommonSetupEvent event) {
         event.enqueueWork(() -> {
             PacketHandler.register();
-            LOGGER.info("Raphael protocol v3 registered: client language sync + localized text + bounded WAV; no Python/localhost/API key required.");
+            LOGGER.info("Raphael protocol v3 registered: language sync + localized text + bounded WAV. OpenVoice tone conversion is local and optional; no persistent Python/backend/API key required.");
         });
     }
 }
