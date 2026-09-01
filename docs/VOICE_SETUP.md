@@ -1,85 +1,103 @@
-# Voice setup — v1.2.0
+# Voice setup — v1.3.0
 
-## Default: nothing to configure
+## Default: no setup required
 
-Great Sage Voice now uses self-managed offline Piper speech by default.
+Raphael uses self-managed offline Piper speech by default. No provider account/API key/Python/FastAPI/localhost service or persistent terminal is required.
 
-You do **not** need:
+## Automatic language selection
 
-- an OpenAI key;
-- an ElevenLabs key;
-- Python;
-- FastAPI;
-- FFmpeg running as a service;
-- localhost ports;
-- a second PowerShell/CMD window;
-- an account with a TTS provider.
+The client sends its selected Minecraft language to the Forge server through the mod channel.
 
-## First run
+- `es_*` locales -> Spanish response text + Spanish voice.
+- all other locales -> English response text + English voice.
 
-When a Minecraft integrated/dedicated server starts, Rafael begins voice preparation asynchronously if `prewarmOfflineVoice=true`.
+The client resends the language when it changes, so switching Minecraft language while connected updates Raphael automatically.
 
-If the runtime/model are not cached yet the mod downloads:
+Use:
 
-- the matching Piper runtime for Windows/Linux/macOS;
-- the `es_AR-daniela-high` ONNX voice and its config.
+```text
+/rafael language
+```
 
-The model file is checked against a pinned SHA-256 before use. Downloads use fixed HTTPS upstream locations and safe archive extraction.
+to confirm what the server currently sees.
 
-Runtime cache:
+## First use and cache
+
+The Piper executable is shared. Voice models are downloaded on demand:
+
+```text
+Spanish: es_AR-daniela-high
+English: en_US-lessac-high
+```
+
+Each high-quality model is roughly 114 MB. A server with only Spanish players does not need the English model and vice versa.
+
+Cache:
 
 ```text
 <game-or-server-dir>/great_sage_voice/offline_voice/
 ```
 
-Approximate first-time download: 140 MB. It is not repeated while valid cached files remain.
+v1.3 automatically migrates the valid Spanish cache layout from v1.2 when possible.
 
-## Test
+## Tests
 
 ```text
 /rafael status
+/rafael prepare
 /rafael voice
+/rafael test realiza un diagnostico completo
+/rafael test run a complete diagnostic
 ```
 
-During the first preparation `/rafael status` may report `preparando` or `descargando`. When ready it reports `Piper local + Daniela high`.
+## Character tuning
 
-Then test contextual local analysis:
-
-```text
-/rafael test realiza un diagnostico del sistema
-/rafael test cual es mi salud
-/rafael test en que dimension estoy
-/rafael test hay peligro
-```
-
-## Voice character tuning
-
-Server config values:
+Server defaults:
 
 ```toml
 ttsProvider = "offline"
 autoInstallOfflineVoice = true
 prewarmOfflineVoice = true
-offlineLengthScale = 1.10
-offlineNoiseScale = 0.48
-offlineNoiseWidth = 0.55
+preferCustomVoiceModels = true
+offlineLengthScale = 1.08
+offlineEnglishLengthScale = 1.05
+offlineNoiseScale = 0.44
+offlineNoiseWidth = 0.50
 ```
 
-Client config:
+Client defaults:
 
 ```toml
 voiceVolume = 1.0
-voiceAuraIntensity = 0.10
+voiceAuraIntensity = 0.11
+voicePresence = 0.10
+uiSoundVolume = 0.36
 ```
 
-Higher `offlineLengthScale` = slower speech. Lower noise values = more controlled/systematic delivery.
+The goal is restrained, feminine, analytical, precise delivery with a subtle internal/system presence. The default open profiles are not represented as recordings or clones of the franchise's real voice performers.
 
-## Optional cloud providers
+## Properly authorized custom character voice
 
-`openai` and `elevenlabs` remain optional compatibility/enhancement paths. They are never required. If selected but unconfigured or unavailable, voice automatically falls back to Piper offline.
+The mod supports Piper-compatible custom models without recompilation:
 
-## Dedicated hosts
+```text
+<game-or-server-dir>/great_sage_voice/custom_voice/es.onnx
+<game-or-server-dir>/great_sage_voice/custom_voice/es.onnx.json
 
-Clients never download the voice model because the Forge server synthesizes the WAV and sends only the resulting bounded audio packet to the player who should hear it.
+<game-or-server-dir>/great_sage_voice/custom_voice/en.onnx
+<game-or-server-dir>/great_sage_voice/custom_voice/en.onnx.json
+```
 
-The host needs outbound HTTPS for initial automatic installation. Once cached, synthesis is local and does not depend on a provider being online.
+When `preferCustomVoiceModels=true`, a valid custom pair takes priority for that language. Keep custom models server-side; the server sends only generated WAV to clients.
+
+Only use models you are permitted to use and distribute/operate.
+
+## Dedicated servers
+
+Install the same v1.3 mod on the Forge server and clients. Different connected players can receive different languages simultaneously. The dedicated host performs TTS and clients never need the ONNX models.
+
+Outbound HTTPS is needed only for first-time automatic downloads of the Piper runtime/model files that are not already cached.
+
+## Optional cloud paths
+
+OpenAI and ElevenLabs remain optional compatibility/enhancement paths. If selected but unavailable/unconfigured, the mod automatically falls back to the correct offline language voice.

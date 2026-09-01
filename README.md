@@ -1,106 +1,155 @@
-# Great Sage Voice (Rafael)
+# Great Sage Voice (Raphael)
 
-Forge 1.20.1 mod focused on a server/client Rafael-style analytical companion: cinematic HUD, contextual event reactions and self-managed offline neural speech.
+Forge 1.20.1 companion mod inspired by the analytical presence of Raphael / Gran Sabio: compact cinematic HUD, local event analysis and self-managed offline neural speech for singleplayer and dedicated servers.
 
-## v1.2.0: voice with no account, API key or terminal
+## v1.3.0 — automatic Spanish / English Raphael
 
-The default voice path is now fully local:
+Raphael now follows the **language selected by each Minecraft client**.
 
-1. Forge starts Rafael on the integrated or dedicated server.
-2. The mod prepares Piper TTS asynchronously.
-3. On the first installation only, it downloads the correct Piper runtime for the host OS and the open Spanish `daniela-high` ONNX voice.
-4. Files are cached under `great_sage_voice/offline_voice/` and reused afterwards.
-5. Rafael synthesizes WAV locally on the server.
-6. Forge sends the bounded WAV bytes directly to the target client.
-7. The client applies a subtle configurable acoustic aura and plays the speech together with the HUD.
+- Any Minecraft locale beginning with `es` -> Spanish text + Spanish neural voice.
+- All other locales -> English text + English neural voice.
+- Language changes are detected while connected; no reconnect or config edit is required.
+- A multiplayer server may speak Spanish to one player and English to another at the same time.
 
-There is **no Python, FastAPI, FFmpeg service, localhost server, API key, paid account or terminal window to keep open**.
+The client sends only a tiny bounded language code to the Forge server. The server owns analysis and speech synthesis and sends back localized text + bounded WAV audio.
 
-The first preparation downloads roughly 140 MB (runtime + high-quality Spanish model). After that, normal offline synthesis uses the cached files. Windows x64, Linux x64, Linux ARM64, macOS x64 and macOS ARM64 are handled automatically.
+## Zero-account voice architecture
 
-## Voice identity
+Default operation still requires **no API key, paid account, Python, FastAPI, FFmpeg service, localhost server or persistent terminal**.
 
-The built-in profile uses the open Piper `es_AR-daniela-high` voice and conservative inference settings to produce a calm, controlled feminine Spanish system voice. It is intentionally an original Rafael-inspired presentation, not a clone of a dub actor.
+The first time a language is needed, the server downloads and caches:
 
-Default tuning:
+- the pinned Piper runtime for the host OS;
+- Spanish: `es_AR-daniela-high` (high quality, 22.05 kHz);
+- English: `en_US-lessac-high` (high quality, 22.05 kHz).
 
-- `offlineLengthScale = 1.10` — calm cadence.
-- `offlineNoiseScale = 0.48` — reduced generator randomness.
-- `offlineNoiseWidth = 0.55` — restrained phoneme variation.
-- client `voiceAuraIntensity = 0.10` — short subtle acoustic reflection without changing pitch or duration.
+Only languages actually used by connected players are downloaded. The Piper runtime is shared by both profiles. Model SHA-256 values are pinned before a downloaded ONNX model is accepted.
 
-See `THIRD_PARTY_NOTICES.md` for source/licensing notices.
+Cache location:
 
-## Local brain
+```text
+<game-or-server-dir>/great_sage_voice/offline_voice/
+```
 
-Rafael no longer becomes useless when no cloud API exists. The server has an integrated deterministic analytical brain for:
+After installation, normal synthesis is local and can continue without a TTS provider.
 
-- login/synchronization;
+## Voice identity: closer to the Great Sage without pretending
+
+The default profiles are **original/open neural voices tuned to evoke Raphael's character**, not copies of the real dub performers. v1.3 improves the character impression with:
+
+- separate Spanish and English cadence tuning;
+- lower synthesis randomness for controlled delivery;
+- shorter sentence silences;
+- conservative loudness normalization;
+- subtle speech-presence enhancement;
+- dual short acoustic reflections for the internal/system-like aura;
+- a quieter layered activation signature;
+- no pitch shift or artificial slowdown after synthesis.
+
+### Authorized custom Raphael voice models
+
+If you have a properly licensed/authorized Piper-compatible voice model, the mod can use it automatically without code changes.
+
+Place server-side files here:
+
+```text
+great_sage_voice/custom_voice/es.onnx
+great_sage_voice/custom_voice/es.onnx.json
+
+great_sage_voice/custom_voice/en.onnx
+great_sage_voice/custom_voice/en.onnx.json
+```
+
+With `preferCustomVoiceModels=true`, those files take priority over built-in Daniela/Lessac profiles. This is the supported path for an actual licensed character voice model.
+
+## Local analytical core
+
+Cloud AI is optional. Without it, Raphael can still react and answer in Spanish or English using real Minecraft telemetry:
+
+- login synchronization;
 - death and respawn;
-- critical health;
-- critical hunger threshold crossing;
-- gamemode changes;
+- post-damage critical health;
+- hunger threshold crossing;
+- low-air / drowning risk;
+- game mode changes;
 - dimension transitions;
 - advancements;
 - optional item tosses;
-- manual diagnostics about health, current dimension, risk and system state.
+- health/max health;
+- hunger;
+- armor;
+- XP level;
+- dimension;
+- approximate coordinates;
+- basic immediate-risk diagnosis.
 
-Cloud-enhanced analysis remains optional. If configured it can supplement the local brain; if it fails, local behavior continues automatically.
+Responses created asynchronously are sequence-checked. If a newer event arrives first, an older delayed response is discarded instead of overwriting the current warning.
 
 ## Commands
 
 ```text
 /rafael status
+/rafael language
 /rafael prepare
 /rafael voice
-/rafael test Hola Rafael, realiza un diagnostico del sistema
+/rafael test realiza un diagnostico completo
+/rafael test run a full diagnostic
 ```
 
-`/rafael prepare` simply requests asynchronous preparation; it does not open a console or start a persistent service. Normally server startup already prewarms the voice automatically.
+Command feedback follows the player's detected language.
 
-## Singleplayer
+## HUD v1.3
 
-Singleplayer has an integrated Minecraft server, so it exercises the same architecture as multiplayer. Install the same JAR in the client instance and run `/rafael voice` in a world.
+- `RAFAEL // GRAN SABIO` in Spanish;
+- `RAPHAEL // GREAT SAGE` in English;
+- localized ANALYSIS / CRITICAL / SYNC / MILESTONE states;
+- visible ES / EN language link;
+- `VOZ LOCAL // ES` or `LOCAL VOICE // EN` indicator;
+- compact screen-safe layout;
+- dynamic wrapping and lifetime;
+- typewriter reveal and cursor;
+- processing bus animation;
+- real fade-in/fade-out;
+- runic core, particles and emotion accents;
+- configurable opacity, scale and line limit.
 
-## Dedicated server
+## Audio client controls
 
-Install the same mod version on server and clients. The dedicated server performs local TTS synthesis and sends speech only to the relevant player. Clients never need Piper files, provider accounts or secrets.
+`great_sage_voice-client.toml` includes:
 
-The host needs outbound HTTPS only for the **first automatic runtime/model download**. Once cached, voice synthesis itself is local.
+```toml
+voiceVolume = 1.0
+voiceAuraIntensity = 0.11
+voicePresence = 0.10
+uiSoundVolume = 0.36
+hudOpacity = 0.94
+```
 
-## Automatic events and anti-spam
+Keep aura/presence conservative; extreme values intentionally remain capped to avoid metallic distortion.
 
-Rafael tracks event cooldowns per player/event. Threshold events fire only when crossing into the critical state, preventing constant repeated speech. Death can bypass the normal cooldown because it is a high-priority event.
+## Server / singleplayer
 
-Item toss narration remains disabled by default because it is naturally noisy.
+Singleplayer uses Minecraft's integrated server and therefore exercises the same language/voice architecture as multiplayer.
 
-## Client presentation
-
-- screen-safe compact holographic panel;
-- dynamic wrapping and duration;
-- typewriter reveal;
-- real fade-in/fade-out and easing;
-- emotion/state accents;
-- animated runic core and particles;
-- independent voice/UI volume;
-- configurable voice aura;
-- new layered activation signature;
-- no duplicated vanilla chat message.
+Dedicated server: install the same v1.3 JAR on server and clients. The server downloads models and synthesizes speech; clients receive only their own localized text/audio packets.
 
 ## Build
 
-Java 17 toolchain, Forge 47.2.20 and Gradle 8.3.
+- Minecraft 1.20.1
+- Forge 47.2.20
+- Java 17 toolchain
+- Gradle 8.3
 
 ```powershell
 .\gradlew.bat clean build --no-daemon
 ```
 
-The project also includes GitHub Actions validation on Java 17.
+GitHub Actions validates the same Java 17 / Gradle 8.3 build path.
 
-## Deploy target used for local testing
-
-After build, the normal JAR is under `build/libs/`. For SKLauncher `test-1`, copy the current JAR to:
+## Local deploy target used for testing
 
 ```text
 C:\Users\santi\AppData\Roaming\.sklauncher\instances\test-1\mods
 ```
+
+See `docs/VOICE_SETUP.md`, `THIRD_PARTY_NOTICES.md` and `SECURITY.md` for details.

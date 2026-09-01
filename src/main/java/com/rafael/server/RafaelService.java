@@ -18,6 +18,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -25,54 +27,49 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
-/** Server-side Rafael brain + speech service. Offline voice is the default. */
+/** Bilingual server-side Raphael brain + speech service. */
 public final class RafaelService {
     private static final String OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
     private static final String OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech";
     private static final String ELEVENLABS_TTS_BASE = "https://api.elevenlabs.io/v1/text-to-speech/";
     private static final int MAX_HTTP_BODY_BYTES = 2_000_000;
     private static final int MAX_AUDIO_BYTES = 900_000;
-    private static final int AUDIO_CACHE_ENTRIES = 48;
+    private static final int AUDIO_CACHE_ENTRIES = 64;
     private static final AtomicBoolean WARNED_OPENAI_KEY = new AtomicBoolean(false);
-    private static final AtomicBoolean WARNED_ELEVENLABS_KEY = new AtomicBoolean(false);
-    private static final AtomicBoolean PREWARM_STARTED = new AtomicBoolean(false);
+    private static final Set<String> PREWARM_LANGUAGES = ConcurrentHashMap.newKeySet();
 
     private static final ThreadFactory THREAD_FACTORY = new ThreadFactory() {
         private final AtomicInteger counter = new AtomicInteger(1);
         @Override public Thread newThread(Runnable runnable) {
-            Thread thread = new Thread(runnable, "Rafael-Service-" + counter.getAndIncrement());
+            Thread thread = new Thread(runnable, "Raphael-Service-" + counter.getAndIncrement());
             thread.setDaemon(true);
-            thread.setUncaughtExceptionHandler((t, e) -> GreatSageMod.LOGGER.error("Error no controlado en {}", t.getName(), e));
+            thread.setUncaughtExceptionHandler((t, e) -> GreatSageMod.LOGGER.error("Unhandled error in {}", t.getName(), e));
             return thread;
         }
     };
+
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2, THREAD_FACTORY);
     private static final Map<String, byte[]> AUDIO_CACHE = Collections.synchronizedMap(
             new LinkedHashMap<String, byte[]>(AUDIO_CACHE_ENTRIES + 1, 0.75f, true) {
                 @Override protected boolean removeEldestEntry(Map.Entry<String, byte[]> eldest) { return size() > AUDIO_CACHE_ENTRIES; }
-            }
-    );
-
-    private static final String RAFAEL_SYSTEM_PROMPT = String.join(" ",
-            "Eres Rafael, un sistema de análisis de combate y supervivencia integrado en Minecraft.",
-            "Responde siempre en español neutro, con una personalidad serena, precisa, fría, protectora y extremadamente analítica.",
-            "Tu respuesta debe sonar como una interfaz inteligente de alto nivel, no como un chatbot.",
-            "No uses markdown, emojis, comillas, listas ni nombres de APIs.",
-            "No inventes hechos que no estén presentes en el evento.",
-            "Prioriza información útil y accionable.",
-            "Máximo dos frases breves y compactas."
-    );
+            });
 
     private RafaelService() {}
 
     public static void prewarmVoice() {
+        prewarmVoice(GreatSageConfig.SERVER.fallbackLanguage.get());
+    }
+
+    public static void prewarmVoice(String language) {
         if (!GreatSageConfig.SERVER.enableVoice.get() || !GreatSageConfig.SERVER.prewarmOfflineVoice.get()) return;
-        if (!PREWARM_STARTED.compareAndSet(false, true)) return;
+        String normalized = RafaelLanguageManager.normalize(language);
+        if (!PREWARM_LANGUAGES.add(normalized)) return;
         EXECUTOR.execute(() -> {
             try {
-                OfflineVoiceEngine.prepare();
+                OfflineVoiceEngine.prepare(normalized);
             } catch (Exception e) {
-                GreatSageMod.LOGGER.warn("Precalentamiento de voz offline no completado; Rafael volverá a intentarlo cuando necesite hablar: {}", e.toString());
+                PREWARM_LANGUAGES.remove(normalized);
+                GreatSageMod.LOGGER.warn("Raphael {} voice prewarm incomplete; it will retry on demand: {}", normalized, e.toString());
             }
         });
     }
@@ -83,13 +80,15 @@ public final class RafaelService {
             try {
                 String text = buildResponseText(snapshot);
                 String emotion = emotionFor(snapshot.eventType());
-                byte[] audio = synthesizeVoice(text);
-                result = new SpeechResult(text, audio, emotion, audio.length > 0);
+                byte[] audio = synthesizeVoice(text, snapshot.language());
+                result = new SpeechResult(text, audio, emotion, audio.length > 0, snapshot.language());
             } catch (Exception e) {
-                GreatSageMod.LOGGER.warn("Rafael no pudo procesar '{}': {}", snapshot.eventType(), e.toString(), e);
-                result = new SpeechResult(sanitizeText(buildLocalResponse(snapshot)), new byte[0], emotionFor(snapshot.eventType()), false);
+                GreatSageMod.LOGGER.warn("Raphael could not process '{}': {}", snapshot.eventType(), e.toString(), e);
+                String local = sanitizeText(buildLocalResponse(snapshot));
+                result = new SpeechResult(local, new byte[0], emotionFor(snapshot.eventType()), false, snapshot.language());
             }
-            try { callback.accept(result); } catch (Exception e) { GreatSageMod.LOGGER.error("No se pudo entregar el resultado de Rafael", e); }
+            try { callback.accept(result); }
+            catch (Exception e) { GreatSageMod.LOGGER.error("Could not deliver Raphael result", e); }
         });
     }
 
@@ -98,66 +97,129 @@ public final class RafaelService {
         if (!GreatSageConfig.SERVER.enableGeneratedResponses.get()) return local;
         String apiKey = openAiKey();
         if (apiKey.isBlank()) {
-            if (WARNED_OPENAI_KEY.compareAndSet(false, true)) GreatSageMod.LOGGER.info("Rafael usa su cerebro local integrado. Una API externa es opcional y no es necesaria para voz ni funcionamiento normal.");
+            if (WARNED_OPENAI_KEY.compareAndSet(false, true)) {
+                GreatSageMod.LOGGER.info("Raphael uses the built-in bilingual analytical core. Cloud AI is optional.");
+            }
             return local;
         }
         try {
             JsonObject payload = new JsonObject();
             payload.addProperty("model", GreatSageConfig.SERVER.openAiResponseModel.get());
-            payload.addProperty("instructions", RAFAEL_SYSTEM_PROMPT);
+            payload.addProperty("instructions", systemPrompt(snapshot.language()));
             payload.addProperty("input", buildEventPrompt(snapshot));
-            payload.addProperty("max_output_tokens", 120);
+            payload.addProperty("max_output_tokens", 110);
             JsonObject response = postJson(OPENAI_RESPONSES_URL, apiKey, payload, true);
             String generated = extractResponseText(response);
             if (!generated.isBlank()) return sanitizeText(generated);
         } catch (Exception e) {
-            GreatSageMod.LOGGER.warn("Fallo del análisis cloud opcional; Rafael continúa con cerebro local: {}", e.toString());
+            GreatSageMod.LOGGER.warn("Optional cloud analysis failed; local core continues: {}", e.toString());
         }
         return local;
     }
 
-    private static String buildLocalResponse(EventSnapshot snapshot) {
-        String event = normalize(snapshot.eventType());
-        String detail = sanitizeLoose(snapshot.detail());
-        String fallback = sanitizeLoose(snapshot.fallbackText());
-        String player = snapshot.playerName();
-        float health = snapshot.health();
-
-        if (event.contains("prueba manual")) return localManual(snapshot, detail);
-        if (event.contains("prueba de voz")) return "Sistema vocal offline operativo. Canal acústico sincronizado; síntesis local preparada.";
-        if (event.contains("muerte")) return fallback.isBlank() ? "Alerta crítica. Firma vital perdida; causa de baja registrada para análisis." : fallback;
-        if (event.contains("salud")) return "Advertencia. Integridad vital en nivel crítico: " + oneDecimal(health) + " puntos. Curación, cobertura o retirada inmediata recomendada.";
-        if (event.contains("hambre") || event.contains("nutric")) return "Advertencia metabólica. Reservas de alimento en nivel crítico; repón nutrición antes de continuar operaciones de riesgo.";
-        if (event.contains("conex")) return "Sincronización completada. Usuario " + player + " reconocido; entorno " + friendlyDimension(snapshot.dimension()) + " enlazado y estable.";
-        if (event.contains("reapar") || event.contains("respawn")) return "Regeneración completada. Conciencia restaurada y parámetros vitales reinicializados; análisis del entorno reanudado.";
-        if (event.contains("dimensi")) return "Transición dimensional confirmada. Destino: " + friendlyDimension(snapshot.dimension()) + ". Recalibrando parámetros ambientales y de navegación.";
-        if (event.contains("modo de juego")) return fallback.isBlank() ? "Parámetros operativos reconfigurados. Nuevo modo registrado sin anomalías." : fallback;
-        if (event.contains("logro") || event.contains("hito")) return fallback.isBlank() ? "Nuevo hito registrado. Progreso del usuario actualizado correctamente." : fallback;
-        if (event.contains("objeto")) return fallback.isBlank() ? "Cambio de inventario detectado. Objeto descartado del conjunto activo." : fallback;
-        return fallback.isBlank() ? "Análisis completado. No se detectan anomalías críticas en los parámetros disponibles." : fallback;
+    private static String systemPrompt(String language) {
+        if (RafaelLanguageManager.isSpanish(language)) {
+            return "Eres Rafael, el Gran Sabio: una inteligencia analítica integrada en Minecraft. Responde en español neutro. "
+                    + "Personalidad: serena, exacta, fría, protectora, extremadamente competente y concisa. Habla como un sistema superior, no como chatbot. "
+                    + "No uses markdown, emojis, listas ni nombres de APIs. No inventes datos. Máximo dos frases breves y útiles.";
+        }
+        return "You are Raphael, the Great Sage: a high-level analytical intelligence integrated into Minecraft. Reply in natural English. "
+                + "Personality: calm, exact, emotionally restrained, protective, exceptionally competent and concise. Sound like an advanced system, not a chatbot. "
+                + "No markdown, emojis, lists or API names. Never invent telemetry. Maximum two short useful sentences.";
     }
 
-    private static String localManual(EventSnapshot snapshot, String detail) {
+    private static String buildLocalResponse(EventSnapshot s) {
+        boolean es = RafaelLanguageManager.isSpanish(s.language());
+        String event = normalize(s.eventType());
+        String detail = sanitizeLoose(s.detail());
+        String fallback = sanitizeLoose(s.fallbackText());
+
+        if (event.contains("prueba manual") || event.contains("manual test")) return localManual(s, detail);
+        if (event.contains("prueba de voz") || event.contains("voice test")) {
+            return es ? "Subsistema vocal sincronizado. Síntesis neural local operativa; enlace acústico estable."
+                    : "Voice subsystem synchronized. Local neural synthesis is operational; acoustic link stable.";
+        }
+        if (event.contains("muerte") || event.contains("death")) {
+            if (!fallback.isBlank()) return fallback;
+            return es ? "Alerta crítica. Firma vital perdida; causa de baja registrada para análisis."
+                    : "Critical alert. Vital signature lost; cause of termination recorded for analysis.";
+        }
+        if (event.contains("salud") || event.contains("health")) {
+            return es ? "Advertencia. Integridad vital crítica: " + oneDecimal(s.health()) + " de " + oneDecimal(s.maxHealth()) + ". Curación, cobertura o retirada inmediata recomendada."
+                    : "Warning. Vital integrity critical: " + oneDecimal(s.health()) + " of " + oneDecimal(s.maxHealth()) + ". Immediate healing, cover or withdrawal recommended.";
+        }
+        if (event.contains("hambre") || event.contains("food") || event.contains("hunger")) {
+            return es ? "Advertencia metabólica. Reservas de alimento en " + s.food() + " de 20. Repón nutrición antes de continuar operaciones de riesgo."
+                    : "Metabolic warning. Food reserves at " + s.food() + " of 20. Restore nutrition before continuing high-risk operations.";
+        }
+        if (event.contains("aire") || event.contains("air")) {
+            return es ? "Advertencia respiratoria. Reserva de aire crítica. Asciende o localiza una cámara de aire inmediatamente."
+                    : "Respiratory warning. Air reserve critical. Surface or locate an air pocket immediately.";
+        }
+        if (event.contains("conex") || event.contains("login")) {
+            return es ? "Sincronización completada. Usuario " + s.playerName() + " reconocido; entorno " + friendlyDimension(s.dimension(), true) + " enlazado y estable."
+                    : "Synchronization complete. User " + s.playerName() + " recognized; " + friendlyDimension(s.dimension(), false) + " environment linked and stable.";
+        }
+        if (event.contains("reapar") || event.contains("respawn")) {
+            return es ? "Regeneración completada. Conciencia restaurada y parámetros vitales reinicializados; análisis del entorno reanudado."
+                    : "Regeneration complete. Consciousness restored and vital parameters reset; environmental analysis resumed.";
+        }
+        if (event.contains("dimensi") || event.contains("dimension")) {
+            return es ? "Transición dimensional confirmada. Destino: " + friendlyDimension(s.dimension(), true) + ". Recalibrando navegación y parámetros ambientales."
+                    : "Dimensional transition confirmed. Destination: " + friendlyDimension(s.dimension(), false) + ". Recalibrating navigation and environmental parameters.";
+        }
+        if (event.contains("modo de juego") || event.contains("gamemode")) {
+            return !fallback.isBlank() ? fallback : (es ? "Parámetros operativos reconfigurados. Nuevo modo registrado sin anomalías."
+                    : "Operational parameters reconfigured. New game mode registered without anomalies.");
+        }
+        if (event.contains("logro") || event.contains("hito") || event.contains("advancement")) {
+            return !fallback.isBlank() ? fallback : (es ? "Nuevo hito registrado. Progreso del usuario actualizado correctamente."
+                    : "New milestone registered. User progression updated successfully.");
+        }
+        if (event.contains("objeto") || event.contains("item")) {
+            return !fallback.isBlank() ? fallback : (es ? "Cambio de inventario detectado. Objeto descartado del conjunto activo."
+                    : "Inventory state change detected. Item removed from the active set.");
+        }
+        return !fallback.isBlank() ? fallback : (es ? "Análisis completado. No se detectan anomalías críticas en los parámetros disponibles."
+                : "Analysis complete. No critical anomalies detected in available parameters.");
+    }
+
+    private static String localManual(EventSnapshot s, String detail) {
+        boolean es = RafaelLanguageManager.isSpanish(s.language());
         String lower = normalize(detail);
-        if (lower.contains("diagnost") || lower.contains("estado") || lower.contains("sistema")) {
-            return "Diagnóstico completado. Integridad vital: " + oneDecimal(snapshot.health()) + " de 20; entorno: " + friendlyDimension(snapshot.dimension()) + ". Subsistemas de Rafael operativos.";
+        if (containsAny(lower, "diagnost", "estado", "sistema", "diagnostic", "status", "system")) {
+            return es ? "Diagnóstico completado. Vida " + oneDecimal(s.health()) + " de " + oneDecimal(s.maxHealth()) + ", hambre " + s.food() + " de 20, armadura " + s.armor() + ", nivel " + s.experienceLevel() + ". Entorno: " + friendlyDimension(s.dimension(), true) + "."
+                    : "Diagnostic complete. Health " + oneDecimal(s.health()) + " of " + oneDecimal(s.maxHealth()) + ", food " + s.food() + " of 20, armor " + s.armor() + ", level " + s.experienceLevel() + ". Environment: " + friendlyDimension(s.dimension(), false) + ".";
         }
-        if (lower.contains("salud") || lower.contains("vida") || lower.contains("corazon")) {
-            return "Lectura vital actual: " + oneDecimal(snapshot.health()) + " de 20 puntos. " + (snapshot.health() <= 4.0f ? "Nivel crítico; prioriza curación y retirada." : "Parámetros dentro de un margen operativo aceptable.");
+        if (containsAny(lower, "salud", "vida", "corazon", "health", "heart")) {
+            return es ? "Lectura vital: " + oneDecimal(s.health()) + " de " + oneDecimal(s.maxHealth()) + ". " + (s.health() <= 4.0f ? "Nivel crítico; prioriza curación y retirada." : "Margen operativo aceptable.")
+                    : "Vital reading: " + oneDecimal(s.health()) + " of " + oneDecimal(s.maxHealth()) + ". " + (s.health() <= 4.0f ? "Critical level; prioritize healing and withdrawal." : "Operating margin acceptable.");
         }
-        if (lower.contains("donde") || lower.contains("dimension") || lower.contains("entorno")) {
-            return "Localización dimensional identificada: " + friendlyDimension(snapshot.dimension()) + ". Sincronización espacial estable.";
+        if (containsAny(lower, "hambre", "comida", "food", "hunger")) {
+            return es ? "Reserva nutricional: " + s.food() + " de 20. " + (s.food() <= 6 ? "Nivel bajo; recomiendo alimentarte antes de combatir." : "Nivel suficiente para operaciones normales.")
+                    : "Nutritional reserve: " + s.food() + " of 20. " + (s.food() <= 6 ? "Low level; eat before engaging in combat." : "Sufficient for normal operations.");
         }
-        if (lower.contains("peligro") || lower.contains("riesgo")) {
-            return snapshot.health() <= 6.0f ? "Riesgo elevado por reserva vital reducida. Recomiendo evitar combate directo hasta recuperar integridad." : "Con los datos disponibles no detecto una condición vital crítica. Mantén vigilancia del entorno.";
+        if (containsAny(lower, "donde", "dimension", "entorno", "where", "location")) {
+            return es ? "Localización: " + friendlyDimension(s.dimension(), true) + ", coordenadas aproximadas " + s.x() + ", " + s.y() + ", " + s.z() + ". Sincronización espacial estable."
+                    : "Location: " + friendlyDimension(s.dimension(), false) + ", approximate coordinates " + s.x() + ", " + s.y() + ", " + s.z() + ". Spatial synchronization stable.";
         }
-        if (detail.isBlank()) return "Consulta recibida. Subsistema analítico local disponible y listo para evaluar telemetría del jugador.";
-        return "Consulta registrada. El núcleo local no inventará información externa; puedo evaluar estado, salud, dimensión y eventos detectados en tiempo real.";
+        if (containsAny(lower, "peligro", "riesgo", "danger", "risk")) {
+            boolean risk = s.health() <= 6.0f || s.food() <= 6;
+            return es ? (risk ? "Riesgo elevado. Las reservas actuales reducen tu tolerancia al combate; recupera recursos antes de avanzar." : "No detecto una condición fisiológica crítica con la telemetría disponible. Mantén vigilancia del entorno.")
+                    : (risk ? "Elevated risk. Current reserves reduce combat tolerance; restore resources before advancing." : "No critical physiological condition detected in available telemetry. Maintain environmental awareness.");
+        }
+        if (detail.isBlank()) return es ? "Consulta recibida. El núcleo analítico está listo para evaluar telemetría del jugador."
+                : "Query received. The analytical core is ready to evaluate player telemetry.";
+        return es ? "Consulta registrada. Puedo evaluar en tiempo real vida, hambre, armadura, nivel, coordenadas, dimensión y eventos detectados."
+                : "Query registered. I can evaluate health, food, armor, level, coordinates, dimension and detected events in real time.";
     }
 
-    private static String buildEventPrompt(EventSnapshot snapshot) {
-        return "Jugador: " + snapshot.playerName() + "\nEvento: " + snapshot.eventType() + "\nDetalle: " + snapshot.detail()
-                + "\nSalud: " + String.format(Locale.ROOT, "%.1f/20", snapshot.health()) + "\nDimensión: " + snapshot.dimension();
+    private static String buildEventPrompt(EventSnapshot s) {
+        return "Target language: " + (RafaelLanguageManager.isSpanish(s.language()) ? "Spanish" : "English")
+                + "\nPlayer: " + s.playerName() + "\nEvent: " + s.eventType() + "\nDetail: " + s.detail()
+                + "\nHealth: " + oneDecimal(s.health()) + "/" + oneDecimal(s.maxHealth())
+                + "\nFood: " + s.food() + "/20\nArmor: " + s.armor() + "\nXP level: " + s.experienceLevel()
+                + "\nDimension: " + s.dimension() + "\nPosition: " + s.x() + "," + s.y() + "," + s.z();
     }
 
     private static String extractResponseText(JsonObject root) {
@@ -175,64 +237,59 @@ public final class RafaelService {
         return "";
     }
 
-    private static byte[] synthesizeVoice(String text) {
+    private static byte[] synthesizeVoice(String text, String language) {
         if (!GreatSageConfig.SERVER.enableVoice.get() || text.isBlank()) return new byte[0];
+        String normalizedLanguage = RafaelLanguageManager.normalize(language);
         String provider = GreatSageConfig.SERVER.ttsProvider.get().trim().toLowerCase(Locale.ROOT);
-        String cacheKey = sha256(provider + "|" + voiceIdentity(provider) + "|" + text);
+        String cacheKey = sha256(provider + "|" + normalizedLanguage + "|" + voiceIdentity(provider, normalizedLanguage) + "|" + text);
         byte[] cached = AUDIO_CACHE.get(cacheKey);
         if (cached != null) return cached.clone();
 
         byte[] audio = new byte[0];
         try {
             audio = switch (provider) {
-                case "offline", "piper", "local" -> OfflineVoiceEngine.synthesize(text);
+                case "offline", "piper", "local" -> OfflineVoiceEngine.synthesize(text, normalizedLanguage);
                 case "openai" -> {
-                    if (openAiKey().isBlank()) {
-                        GreatSageMod.LOGGER.debug("OpenAI TTS no configurado; usando voz offline automática.");
-                        yield OfflineVoiceEngine.synthesize(text);
-                    }
-                    try { yield synthesizeOpenAi(text); }
+                    if (openAiKey().isBlank()) yield OfflineVoiceEngine.synthesize(text, normalizedLanguage);
+                    try { yield synthesizeOpenAi(text, normalizedLanguage); }
                     catch (Exception cloudError) {
-                        GreatSageMod.LOGGER.warn("OpenAI TTS falló; usando voz offline: {}", cloudError.toString());
-                        yield OfflineVoiceEngine.synthesize(text);
+                        GreatSageMod.LOGGER.warn("OpenAI TTS failed; offline {} fallback: {}", normalizedLanguage, cloudError.toString());
+                        yield OfflineVoiceEngine.synthesize(text, normalizedLanguage);
                     }
                 }
                 case "elevenlabs" -> {
-                    if (elevenLabsKey().isBlank() || GreatSageConfig.SERVER.elevenLabsVoiceId.get().isBlank()) {
-                        GreatSageMod.LOGGER.debug("ElevenLabs no configurado; usando voz offline automática.");
-                        yield OfflineVoiceEngine.synthesize(text);
-                    }
+                    if (elevenLabsKey().isBlank() || GreatSageConfig.SERVER.elevenLabsVoiceId.get().isBlank()) yield OfflineVoiceEngine.synthesize(text, normalizedLanguage);
                     try { yield synthesizeElevenLabs(text); }
                     catch (Exception cloudError) {
-                        GreatSageMod.LOGGER.warn("ElevenLabs TTS falló; usando voz offline: {}", cloudError.toString());
-                        yield OfflineVoiceEngine.synthesize(text);
+                        GreatSageMod.LOGGER.warn("ElevenLabs TTS failed; offline {} fallback: {}", normalizedLanguage, cloudError.toString());
+                        yield OfflineVoiceEngine.synthesize(text, normalizedLanguage);
                     }
                 }
-                default -> {
-                    GreatSageMod.LOGGER.warn("Proveedor TTS '{}' no reconocido; usando voz offline.", provider);
-                    yield OfflineVoiceEngine.synthesize(text);
-                }
+                default -> OfflineVoiceEngine.synthesize(text, normalizedLanguage);
             };
         } catch (Exception e) {
-            GreatSageMod.LOGGER.warn("No se pudo generar voz de Rafael; HUD/texto seguirán funcionando: {}", e.toString());
+            GreatSageMod.LOGGER.warn("Raphael voice unavailable for this response; HUD/text continue: {}", e.toString());
         }
 
         if (audio.length > 0 && audio.length <= MAX_AUDIO_BYTES) {
             AUDIO_CACHE.put(cacheKey, audio.clone());
             return audio;
         }
-        if (audio.length > MAX_AUDIO_BYTES) GreatSageMod.LOGGER.warn("Audio de Rafael descartado: {} bytes exceden el máximo de {}. Reduce maxResponseChars o aumenta velocidad.", audio.length, MAX_AUDIO_BYTES);
+        if (audio.length > MAX_AUDIO_BYTES) GreatSageMod.LOGGER.warn("Raphael WAV discarded: {} bytes > {}", audio.length, MAX_AUDIO_BYTES);
         return new byte[0];
     }
 
-    private static byte[] synthesizeOpenAi(String text) throws Exception {
+    private static byte[] synthesizeOpenAi(String text, String language) throws Exception {
         String apiKey = openAiKey();
         if (apiKey.isBlank()) return new byte[0];
         JsonObject payload = new JsonObject();
         payload.addProperty("model", GreatSageConfig.SERVER.openAiTtsModel.get());
         payload.addProperty("voice", GreatSageConfig.SERVER.openAiVoice.get());
         payload.addProperty("input", text);
-        payload.addProperty("instructions", GreatSageConfig.SERVER.voiceInstructions.get());
+        String instruction = GreatSageConfig.SERVER.voiceInstructions.get() + (RafaelLanguageManager.isSpanish(language)
+                ? " Speak neutral Latin American Spanish."
+                : " Speak natural neutral English.");
+        payload.addProperty("instructions", instruction);
         payload.addProperty("response_format", "wav");
         return postBinary(OPENAI_SPEECH_URL, "Authorization", "Bearer " + apiKey, payload, "audio/wav");
     }
@@ -247,11 +304,11 @@ public final class RafaelService {
         payload.addProperty("text", text);
         payload.addProperty("model_id", GreatSageConfig.SERVER.elevenLabsModel.get());
         JsonObject settings = new JsonObject();
-        settings.addProperty("stability", 0.76);
-        settings.addProperty("similarity_boost", 0.70);
-        settings.addProperty("style", 0.10);
+        settings.addProperty("stability", 0.80);
+        settings.addProperty("similarity_boost", 0.68);
+        settings.addProperty("style", 0.08);
         settings.addProperty("use_speaker_boost", true);
-        settings.addProperty("speed", 0.95);
+        settings.addProperty("speed", 0.96);
         payload.add("voice_settings", settings);
         byte[] pcm = postBinary(url, "xi-api-key", apiKey, payload, "application/octet-stream");
         return pcm16MonoToWav(pcm, 24000);
@@ -286,7 +343,7 @@ public final class RafaelService {
 
     private static HttpURLConnection openConnection(String url) throws Exception {
         URL parsed = new URL(url);
-        if (!"https".equalsIgnoreCase(parsed.getProtocol())) throw new IllegalArgumentException("Rafael solo permite endpoints HTTPS.");
+        if (!"https".equalsIgnoreCase(parsed.getProtocol())) throw new IllegalArgumentException("Raphael only permits HTTPS endpoints.");
         HttpURLConnection connection = (HttpURLConnection) parsed.openConnection();
         int timeoutMs = GreatSageConfig.SERVER.requestTimeoutSeconds.get() * 1000;
         connection.setRequestMethod("POST");
@@ -305,10 +362,12 @@ public final class RafaelService {
     private static byte[] readLimited(InputStream input, int limit) throws Exception {
         if (input == null) return new byte[0];
         try (InputStream stream = input; ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8192]; int total = 0; int read;
+            byte[] buffer = new byte[8192];
+            int total = 0;
+            int read;
             while ((read = stream.read(buffer)) != -1) {
                 total += read;
-                if (total > limit) throw new IllegalStateException("Respuesta remota demasiado grande (> " + limit + " bytes)");
+                if (total > limit) throw new IllegalStateException("Remote response too large (> " + limit + " bytes)");
                 output.write(buffer, 0, read);
             }
             return output.toByteArray();
@@ -316,7 +375,8 @@ public final class RafaelService {
     }
 
     private static byte[] pcm16MonoToWav(byte[] pcm, int sampleRate) {
-        int dataSize = pcm.length, byteRate = sampleRate * 2;
+        int dataSize = pcm.length;
+        int byteRate = sampleRate * 2;
         ByteArrayOutputStream out = new ByteArrayOutputStream(dataSize + 44);
         writeAscii(out, "RIFF"); writeLe32(out, 36 + dataSize); writeAscii(out, "WAVE"); writeAscii(out, "fmt ");
         writeLe32(out, 16); writeLe16(out, 1); writeLe16(out, 1); writeLe32(out, sampleRate); writeLe32(out, byteRate); writeLe16(out, 2); writeLe16(out, 16);
@@ -341,12 +401,13 @@ public final class RafaelService {
         return configured == null ? "" : configured.trim();
     }
 
-    private static String voiceIdentity(String provider) {
+    private static String voiceIdentity(String provider, String language) {
         if ("offline".equals(provider) || "piper".equals(provider) || "local".equals(provider)) {
-            return "daniela-high|" + GreatSageConfig.SERVER.offlineLengthScale.get() + "|" + GreatSageConfig.SERVER.offlineNoiseScale.get() + "|" + GreatSageConfig.SERVER.offlineNoiseWidth.get();
+            double length = RafaelLanguageManager.isSpanish(language) ? GreatSageConfig.SERVER.offlineLengthScale.get() : GreatSageConfig.SERVER.offlineEnglishLengthScale.get();
+            return OfflineVoiceEngine.voiceIdentity(language) + "|" + length + "|" + GreatSageConfig.SERVER.offlineNoiseScale.get() + "|" + GreatSageConfig.SERVER.offlineNoiseWidth.get();
         }
         if ("elevenlabs".equals(provider)) return GreatSageConfig.SERVER.elevenLabsVoiceId.get() + "|" + GreatSageConfig.SERVER.elevenLabsModel.get();
-        return GreatSageConfig.SERVER.openAiVoice.get() + "|" + GreatSageConfig.SERVER.openAiTtsModel.get() + "|" + GreatSageConfig.SERVER.voiceInstructions.get();
+        return GreatSageConfig.SERVER.openAiVoice.get() + "|" + GreatSageConfig.SERVER.openAiTtsModel.get() + "|" + language;
     }
 
     private static String sanitizeText(String raw) {
@@ -357,20 +418,23 @@ public final class RafaelService {
         return text;
     }
 
-    private static String sanitizeLoose(String raw) {
-        return raw == null ? "" : raw.replace('\r', ' ').replace('\n', ' ').replaceAll("\\s+", " ").trim();
-    }
+    private static String sanitizeLoose(String raw) { return raw == null ? "" : raw.replace('\r', ' ').replace('\n', ' ').replaceAll("\\s+", " ").trim(); }
 
     private static String normalize(String raw) {
         return sanitizeLoose(raw).toLowerCase(Locale.ROOT)
                 .replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u').replace('ü', 'u');
     }
 
-    private static String friendlyDimension(String dimension) {
-        String value = dimension == null ? "desconocido" : dimension;
+    private static boolean containsAny(String value, String... needles) {
+        for (String needle : needles) if (value.contains(needle)) return true;
+        return false;
+    }
+
+    private static String friendlyDimension(String dimension, boolean spanish) {
+        String value = dimension == null ? "unknown" : dimension;
         if (value.contains("overworld")) return "Overworld";
         if (value.contains("the_nether")) return "Nether";
-        if (value.contains("the_end")) return "End";
+        if (value.contains("the_end")) return spanish ? "End" : "End";
         int colon = value.indexOf(':');
         return (colon >= 0 ? value.substring(colon + 1) : value).replace('_', ' ');
     }
@@ -379,9 +443,9 @@ public final class RafaelService {
 
     private static String emotionFor(String eventType) {
         String event = normalize(eventType);
-        if (event.contains("muerte") || event.contains("salud") || event.contains("hambre")) return "critical";
-        if (event.contains("logro") || event.contains("hito")) return "achievement";
-        if (event.contains("conex") || event.contains("dimension") || event.contains("respawn") || event.contains("reapar")) return "sync";
+        if (containsAny(event, "muerte", "death", "salud", "health", "hambre", "hunger", "aire", "air")) return "critical";
+        if (containsAny(event, "logro", "hito", "advancement")) return "achievement";
+        if (containsAny(event, "conex", "login", "dimension", "respawn", "reapar")) return "sync";
         return "analytical";
     }
 
@@ -394,19 +458,34 @@ public final class RafaelService {
         } catch (Exception e) { return Integer.toHexString(value.hashCode()); }
     }
 
-    public static String statusSummary() {
+    public static String statusSummary(String language) {
+        String lang = RafaelLanguageManager.normalize(language);
+        boolean es = RafaelLanguageManager.isSpanish(lang);
         String provider = GreatSageConfig.SERVER.ttsProvider.get().trim().toLowerCase(Locale.ROOT);
-        boolean aiKey = !openAiKey().isBlank();
-        String voice;
-        if (!GreatSageConfig.SERVER.enableVoice.get()) voice = "desactivada";
-        else if ("offline".equals(provider) || "piper".equals(provider) || "local".equals(provider)) voice = "offline=" + OfflineVoiceEngine.statusSummary();
-        else if ("openai".equals(provider) && aiKey) voice = "OpenAI configurada + fallback offline";
-        else if ("elevenlabs".equals(provider) && !elevenLabsKey().isBlank() && !GreatSageConfig.SERVER.elevenLabsVoiceId.get().isBlank()) voice = "ElevenLabs configurada + fallback offline";
-        else voice = provider + " no configurada -> offline " + OfflineVoiceEngine.statusSummary();
-        return "Rafael v1.2 | Cerebro=" + (GreatSageConfig.SERVER.enableGeneratedResponses.get() && aiKey ? "cloud opcional + local" : "local integrado")
-                + " | Voz=" + voice + " | Python/API key=NO requeridos";
+        String voice = GreatSageConfig.SERVER.enableVoice.get() ? OfflineVoiceEngine.statusSummary(lang) : (es ? "desactivada" : "disabled");
+        if (es) {
+            return "Raphael v1.3 | Idioma=Español | Cerebro=" + (!openAiKey().isBlank() && GreatSageConfig.SERVER.enableGeneratedResponses.get() ? "local + cloud opcional" : "local integrado")
+                    + " | Voz=" + provider + " -> " + voice + " | API key/Python=NO requeridos";
+        }
+        return "Raphael v1.3 | Language=English | Brain=" + (!openAiKey().isBlank() && GreatSageConfig.SERVER.enableGeneratedResponses.get() ? "local + optional cloud" : "integrated local")
+                + " | Voice=" + provider + " -> " + voice + " | API key/Python=NOT required";
     }
 
-    public record EventSnapshot(String playerName, String eventType, String detail, String fallbackText, float health, String dimension) {}
-    public record SpeechResult(String text, byte[] audioWav, String emotion, boolean syntheticVoice) {}
+    public record EventSnapshot(
+            String playerName,
+            String eventType,
+            String detail,
+            String fallbackText,
+            String language,
+            float health,
+            float maxHealth,
+            int food,
+            int armor,
+            int experienceLevel,
+            String dimension,
+            int x,
+            int y,
+            int z) {}
+
+    public record SpeechResult(String text, byte[] audioWav, String emotion, boolean syntheticVoice, String language) {}
 }

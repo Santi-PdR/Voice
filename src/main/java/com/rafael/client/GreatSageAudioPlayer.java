@@ -14,6 +14,7 @@ import javax.sound.sampled.FloatControl;
 import javax.sound.sampled.LineEvent;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -23,7 +24,7 @@ public final class GreatSageAudioPlayer {
     private static final AtomicReference<Clip> CURRENT_VOICE = new AtomicReference<>();
     private static final ExecutorService VOICE_EXECUTOR = Executors.newSingleThreadExecutor(new ThreadFactory() {
         @Override public Thread newThread(Runnable runnable) {
-            Thread thread = new Thread(runnable, "Rafael-Client-Audio");
+            Thread thread = new Thread(runnable, "Raphael-Client-Audio");
             thread.setDaemon(true);
             return thread;
         }
@@ -35,8 +36,11 @@ public final class GreatSageAudioPlayer {
         playActivationCue();
         float volume = (float) GreatSageClientConfig.CLIENT.voiceVolume.get().doubleValue();
         if (volume <= 0f || wavData == null || wavData.length < 44) return;
-        byte[] immutableAudio = applyVoiceAura(wavData.clone(), GreatSageClientConfig.CLIENT.voiceAuraIntensity.get().floatValue());
-        VOICE_EXECUTOR.execute(() -> decodeAndPlay(immutableAudio, volume));
+
+        float aura = GreatSageClientConfig.CLIENT.voiceAuraIntensity.get().floatValue();
+        float presence = GreatSageClientConfig.CLIENT.voicePresence.get().floatValue();
+        byte[] processed = applyRaphaelSignature(wavData.clone(), aura, presence);
+        VOICE_EXECUTOR.execute(() -> decodeAndPlay(processed, volume));
     }
 
     private static void decodeAndPlay(byte[] wavData, float volume) {
@@ -54,9 +58,11 @@ public final class GreatSageAudioPlayer {
                     Math.max(1, sourceFormat.getChannels()) * 2,
                     sourceFormat.getSampleRate(),
                     false);
+
             if (!isClipFriendly(sourceFormat) && AudioSystem.isConversionSupported(targetFormat, sourceFormat)) {
                 playableStream = AudioSystem.getAudioInputStream(targetFormat, sourceStream);
             }
+
             Clip clip = AudioSystem.getClip();
             clip.open(playableStream);
             configureVolume(clip, volume);
@@ -68,67 +74,131 @@ public final class GreatSageAudioPlayer {
                 }
             });
             clip.start();
-            GreatSageMod.LOGGER.info("Voz de Rafael iniciada: {} Hz, {} bit, {} canal(es), ~{} ms",
+            GreatSageMod.LOGGER.info("Raphael voice started: {} Hz, {} bit, {} channel(s), ~{} ms",
                     clip.getFormat().getSampleRate(), clip.getFormat().getSampleSizeInBits(),
                     clip.getFormat().getChannels(), clip.getMicrosecondLength() / 1000L);
         } catch (Exception e) {
-            GreatSageMod.LOGGER.warn("No se pudo reproducir el WAV recibido de Rafael: {}", e.toString(), e);
+            GreatSageMod.LOGGER.warn("Could not play Raphael WAV: {}", e.toString(), e);
         }
     }
 
-    /** Adds a restrained ~34 ms reflection to canonical PCM WAV without changing duration/pitch. */
-    private static byte[] applyVoiceAura(byte[] wav, float intensity) {
-        if (intensity <= 0.001f || wav.length < 48) return wav;
+    /**
+     * Creates a restrained Great Sage-like system presence without changing pitch or duration:
+     * conservative peak normalization, slight transient/presence emphasis and two very short reflections.
+     * Only canonical PCM16 little-endian WAV is altered; all other formats pass through untouched.
+     */
+    private static byte[] applyRaphaelSignature(byte[] wav, float aura, float presence) {
+        if (wav.length < 48 || (aura <= 0.001f && presence <= 0.001f)) return wav;
         try {
-            if (wav[0] != 'R' || wav[1] != 'I' || wav[2] != 'F' || wav[3] != 'F') return wav;
-            int sampleRate = readLe32(wav, 24);
-            if (sampleRate < 8000 || sampleRate > 192000) return wav;
-            int dataOffset = findDataOffset(wav);
-            if (dataOffset < 0 || dataOffset + 2 >= wav.length) return wav;
-            int delaySamples = Math.max(1, Math.round(sampleRate * 0.034f));
-            int delayBytes = delaySamples * 2;
-            int dryScale = 92;
-            int wetScale = Math.max(1, Math.round(intensity * 100f));
-            for (int p = dataOffset + delayBytes; p + 1 < wav.length; p += 2) {
-                int dry = readLe16Signed(wav, p);
-                int delayed = readLe16Signed(wav, p - delayBytes);
-                int mixed = (dry * dryScale + delayed * wetScale) / 100;
-                mixed = Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, mixed));
-                wav[p] = (byte) (mixed & 0xFF);
-                wav[p + 1] = (byte) ((mixed >>> 8) & 0xFF);
+            WavInfo info = inspectPcm16Wav(wav);
+            if (info == null) return wav;
+
+            int frameBytes = info.channels() * 2;
+            int sampleCount = info.dataSize() / 2;
+            if (sampleCount <= info.channels() * 16) return wav;
+
+            short[] original = new short[sampleCount];
+            int peak = 1;
+            for (int i = 0; i < sampleCount; i++) {
+                short sample = (short) readLe16Unsigned(wav, info.dataOffset() + i * 2);
+                original[i] = sample;
+                peak = Math.max(peak, Math.abs((int) sample));
             }
-        } catch (Exception ignored) {
-            GreatSageMod.LOGGER.debug("No se aplicó aura PCM; se reproduce el WAV original.");
+
+            float normalizeGain = Math.min(1.08f, 28600.0f / peak);
+            int delayFramesA = Math.max(1, Math.round(info.sampleRate() * 0.027f));
+            int delayFramesB = Math.max(delayFramesA + 1, Math.round(info.sampleRate() * 0.051f));
+            int delaySamplesA = delayFramesA * info.channels();
+            int delaySamplesB = delayFramesB * info.channels();
+            int fadeFrames = Math.max(1, Math.round(info.sampleRate() * 0.006f));
+            int totalFrames = sampleCount / info.channels();
+
+            short[] result = new short[sampleCount];
+            for (int i = 0; i < sampleCount; i++) {
+                int channel = i % info.channels();
+                int previousIndex = i - info.channels();
+                float dry = original[i] * normalizeGain;
+                float previous = previousIndex >= channel ? original[previousIndex] * normalizeGain : dry;
+
+                // Tiny high-frequency/transient emphasis. Intentionally subtle to avoid metallic TTS artifacts.
+                float shaped = dry + (dry - previous) * (presence * 0.22f);
+                float reflectedA = i >= delaySamplesA ? original[i - delaySamplesA] * normalizeGain : 0.0f;
+                float reflectedB = i >= delaySamplesB ? original[i - delaySamplesB] * normalizeGain : 0.0f;
+                float mixed = shaped * (1.0f - aura * 0.28f)
+                        + reflectedA * aura
+                        + reflectedB * aura * 0.43f;
+
+                int frame = i / info.channels();
+                float envelope = 1.0f;
+                if (frame < fadeFrames) envelope = frame / (float) fadeFrames;
+                else if (frame >= totalFrames - fadeFrames) envelope = Math.max(0.0f, (totalFrames - 1 - frame) / (float) fadeFrames);
+                mixed *= envelope;
+                result[i] = clamp16(Math.round(mixed));
+            }
+
+            for (int i = 0; i < sampleCount; i++) {
+                int offset = info.dataOffset() + i * 2;
+                int value = result[i];
+                wav[offset] = (byte) (value & 0xFF);
+                wav[offset + 1] = (byte) ((value >>> 8) & 0xFF);
+            }
+            return wav;
+        } catch (Exception e) {
+            GreatSageMod.LOGGER.debug("Raphael voice signature skipped; original WAV retained: {}", e.toString());
+            return wav;
         }
-        return wav;
     }
 
-    private static int findDataOffset(byte[] wav) {
+    private static WavInfo inspectPcm16Wav(byte[] wav) {
+        if (wav.length < 44 || wav[0] != 'R' || wav[1] != 'I' || wav[2] != 'F' || wav[3] != 'F'
+                || wav[8] != 'W' || wav[9] != 'A' || wav[10] != 'V' || wav[11] != 'E') return null;
         int p = 12;
+        int format = -1;
+        int channels = -1;
+        int sampleRate = -1;
+        int bits = -1;
+        int dataOffset = -1;
+        int dataSize = -1;
+
         while (p + 8 <= wav.length) {
-            String id = new String(wav, p, 4, java.nio.charset.StandardCharsets.US_ASCII);
+            String id = new String(wav, p, 4, StandardCharsets.US_ASCII);
             int size = readLe32(wav, p + 4);
-            if (size < 0) return -1;
-            if ("data".equals(id)) return p + 8;
-            long next = (long) p + 8L + size + (size & 1);
-            if (next > wav.length || next <= p) return -1;
-            p = (int) next;
+            if (size < 0 || (long) p + 8L + size > wav.length) return null;
+            if ("fmt ".equals(id) && size >= 16) {
+                format = readLe16Unsigned(wav, p + 8);
+                channels = readLe16Unsigned(wav, p + 10);
+                sampleRate = readLe32(wav, p + 12);
+                bits = readLe16Unsigned(wav, p + 22);
+            } else if ("data".equals(id)) {
+                dataOffset = p + 8;
+                dataSize = size;
+                break;
+            }
+            p += 8 + size + (size & 1);
         }
-        return -1;
+
+        if (format != 1 || channels < 1 || channels > 2 || sampleRate < 8000 || sampleRate > 192000
+                || bits != 16 || dataOffset < 0 || dataSize < 2 || dataOffset + dataSize > wav.length) return null;
+        return new WavInfo(sampleRate, channels, dataOffset, dataSize);
     }
 
     private static int readLe32(byte[] data, int offset) {
         if (offset < 0 || offset + 3 >= data.length) return -1;
-        return (data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8) | ((data[offset + 2] & 0xFF) << 16) | ((data[offset + 3] & 0xFF) << 24);
+        return (data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8)
+                | ((data[offset + 2] & 0xFF) << 16) | ((data[offset + 3] & 0xFF) << 24);
     }
 
-    private static int readLe16Signed(byte[] data, int offset) {
-        int value = (data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8);
-        return (short) value;
+    private static int readLe16Unsigned(byte[] data, int offset) {
+        return (data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8);
+    }
+
+    private static short clamp16(int value) {
+        return (short) Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, value));
     }
 
     private static boolean isClipFriendly(AudioFormat format) {
-        return AudioFormat.Encoding.PCM_SIGNED.equals(format.getEncoding()) && format.getSampleSizeInBits() == 16 && !format.isBigEndian();
+        return AudioFormat.Encoding.PCM_SIGNED.equals(format.getEncoding())
+                && format.getSampleSizeInBits() == 16 && !format.isBigEndian();
     }
 
     private static void configureVolume(Clip clip, float volume) {
@@ -137,7 +207,7 @@ public final class GreatSageAudioPlayer {
             float dB = (float) (20.0 * Math.log10(Math.max(0.0001f, volume)));
             gain.setValue(Math.max(gain.getMinimum(), Math.min(gain.getMaximum(), dB)));
         } catch (Exception ignored) {
-            GreatSageMod.LOGGER.debug("El mixer del sistema no expone MASTER_GAIN para la voz de Rafael.");
+            GreatSageMod.LOGGER.debug("System mixer does not expose MASTER_GAIN for Raphael voice.");
         }
     }
 
@@ -156,8 +226,8 @@ public final class GreatSageAudioPlayer {
         if (volume <= 0f) return;
         minecraft.execute(() -> {
             if (minecraft.player == null || minecraft.player.level() == null) return;
-            minecraft.player.level().playSound(minecraft.player, minecraft.player.blockPosition(), SoundEvents.ENCHANTMENT_TABLE_USE, SoundSource.PLAYERS, 0.34f * volume, 1.52f);
-            minecraft.player.level().playSound(minecraft.player, minecraft.player.blockPosition(), SoundEvents.AMETHYST_BLOCK_CHIME, SoundSource.PLAYERS, 0.24f * volume, 1.75f);
+            minecraft.player.level().playSound(minecraft.player, minecraft.player.blockPosition(), SoundEvents.ENCHANTMENT_TABLE_USE, SoundSource.PLAYERS, 0.28f * volume, 1.58f);
+            minecraft.player.level().playSound(minecraft.player, minecraft.player.blockPosition(), SoundEvents.AMETHYST_BLOCK_CHIME, SoundSource.PLAYERS, 0.22f * volume, 1.82f);
         });
     }
 
@@ -168,8 +238,10 @@ public final class GreatSageAudioPlayer {
         if (volume <= 0f) return;
         minecraft.execute(() -> {
             if (minecraft.player != null && minecraft.player.level() != null) {
-                minecraft.player.level().playSound(minecraft.player, minecraft.player.blockPosition(), SoundEvents.NOTE_BLOCK_PLING.get(), SoundSource.PLAYERS, 0.065f * volume, 2.0f);
+                minecraft.player.level().playSound(minecraft.player, minecraft.player.blockPosition(), SoundEvents.NOTE_BLOCK_PLING.get(), SoundSource.PLAYERS, 0.055f * volume, 2.0f);
             }
         });
     }
+
+    private record WavInfo(int sampleRate, int channels, int dataOffset, int dataSize) {}
 }

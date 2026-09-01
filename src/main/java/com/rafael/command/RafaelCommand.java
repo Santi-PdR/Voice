@@ -4,6 +4,7 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.rafael.network.PacketHandler;
 import com.rafael.server.AIEventManager;
+import com.rafael.server.RafaelLanguageManager;
 import com.rafael.server.RafaelService;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -19,36 +20,58 @@ public final class RafaelCommand {
                         .then(Commands.argument("message", StringArgumentType.greedyString())
                                 .executes(context -> {
                                     ServerPlayer player = context.getSource().getPlayerOrException();
+                                    String language = RafaelLanguageManager.get(player);
+                                    boolean es = RafaelLanguageManager.isSpanish(language);
                                     String message = StringArgumentType.getString(context, "message").trim();
                                     if (message.isEmpty()) {
-                                        context.getSource().sendFailure(Component.literal("§cEscribe un mensaje para Rafael."));
+                                        context.getSource().sendFailure(Component.literal(es ? "§cEscribe un mensaje para Rafael." : "§cEnter a message for Raphael."));
                                         return 0;
                                     }
-                                    String fallback = "Consulta recibida. " + message;
-                                    AIEventManager.triggerAIEvent(player, "Prueba Manual", message, fallback, false);
-                                    context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §7Analizando con el núcleo local; la voz se genera sin API key."), false);
+                                    AIEventManager.triggerAIEvent(player, "MANUAL TEST", message, "", true);
+                                    context.getSource().sendSuccess(() -> Component.literal(es
+                                            ? "§b[Rafael] §7Analizando telemetría en español…"
+                                            : "§b[Raphael] §7Analyzing telemetry in English…"), false);
                                     return 1;
                                 })))
                 .then(Commands.literal("voice")
                         .executes(context -> {
                             ServerPlayer player = context.getSource().getPlayerOrException();
-                            String phrase = "Sistema vocal offline operativo. Sincronización acústica completada.";
-                            AIEventManager.triggerAIEvent(player, "Prueba de Voz", phrase, phrase, false);
-                            context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §7Preparando síntesis local. La primera ejecución puede descargar el modelo automáticamente."), false);
+                            String language = RafaelLanguageManager.get(player);
+                            boolean es = RafaelLanguageManager.isSpanish(language);
+                            AIEventManager.triggerAIEvent(player, "VOICE TEST", "Offline neural voice test", "", true);
+                            context.getSource().sendSuccess(() -> Component.literal(es
+                                    ? "§b[Rafael] §7Prueba de voz neural local solicitada."
+                                    : "§b[Raphael] §7Local neural voice test requested."), false);
                             return 1;
                         }))
                 .then(Commands.literal("status")
                         .executes(context -> {
                             ServerPlayer player = context.getSource().getPlayerOrException();
-                            String status = RafaelService.statusSummary();
-                            PacketHandler.sendToClient(player, status, new byte[0], "sync", false);
-                            context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §f" + status), false);
+                            String language = RafaelLanguageManager.get(player);
+                            String status = RafaelService.statusSummary(language);
+                            PacketHandler.sendToClient(player, status, new byte[0], "sync", false, language);
+                            context.getSource().sendSuccess(() -> Component.literal("§b[Raphael] §f" + status), false);
                             return 1;
                         }))
                 .then(Commands.literal("prepare")
                         .executes(context -> {
-                            RafaelService.prewarmVoice();
-                            context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §7Preparación offline solicitada. Usa /rafael status para ver el estado."), false);
+                            ServerPlayer player = context.getSource().getPlayerOrException();
+                            String language = RafaelLanguageManager.get(player);
+                            boolean es = RafaelLanguageManager.isSpanish(language);
+                            RafaelService.prewarmVoice(language);
+                            context.getSource().sendSuccess(() -> Component.literal(es
+                                    ? "§b[Rafael] §7Preparación de la voz española solicitada. Usa /rafael status."
+                                    : "§b[Raphael] §7English voice preparation requested. Use /rafael status."), false);
+                            return 1;
+                        }))
+                .then(Commands.literal("language")
+                        .executes(context -> {
+                            ServerPlayer player = context.getSource().getPlayerOrException();
+                            String language = RafaelLanguageManager.get(player);
+                            boolean es = RafaelLanguageManager.isSpanish(language);
+                            context.getSource().sendSuccess(() -> Component.literal(es
+                                    ? "§b[Rafael] §fIdioma detectado: Español. La voz y respuestas se adaptan automáticamente."
+                                    : "§b[Raphael] §fDetected language: English. Voice and responses adapt automatically."), false);
                             return 1;
                         })));
     }
