@@ -7,28 +7,23 @@ public class GreatSageClientConfig {
     public static class Client {
         public final ForgeConfigSpec.DoubleValue hudScale;
         public final ForgeConfigSpec.IntValue typingSpeedMs;
+        public final ForgeConfigSpec.IntValue maxHudLines;
         public final ForgeConfigSpec.DoubleValue voiceVolume;
+        public final ForgeConfigSpec.DoubleValue uiSoundVolume;
+        public final ForgeConfigSpec.BooleanValue enableActivationSound;
         public final ForgeConfigSpec.BooleanValue enableTypewriterSound;
+        public final ForgeConfigSpec.BooleanValue showSyntheticVoiceLabel;
 
         public Client(ForgeConfigSpec.Builder builder) {
             builder.push("Great Sage Client Configuration (HUD & Audio)");
-
-            hudScale = builder
-                    .comment("Escala del HUD cinemático de Rafael en pantalla.")
-                    .defineInRange("hudScale", 1.0, 0.5, 2.0);
-
-            typingSpeedMs = builder
-                    .comment("Velocidad de escritura efecto máquina de escribir (milisegundos por carácter).")
-                    .defineInRange("typingSpeedMs", 25, 5, 100);
-
-            voiceVolume = builder
-                    .comment("Volumen general de la voz y efectos de Rafael.")
-                    .defineInRange("voiceVolume", 1.0, 0.0, 1.0);
-
-            enableTypewriterSound = builder
-                    .comment("Activar efectos de sonido de tecleo cibernético al aparecer texto.")
-                    .define("enableTypewriterSound", true);
-
+            hudScale = builder.comment("Scale of the cinematic Rafael HUD. Layout remains screen-safe at every supported scale.").defineInRange("hudScale", 1.0, 0.65, 1.6);
+            typingSpeedMs = builder.comment("Typewriter speed in milliseconds per character.").defineInRange("typingSpeedMs", 22, 5, 80);
+            maxHudLines = builder.comment("Maximum wrapped text lines shown in the compact Rafael panel.").defineInRange("maxHudLines", 4, 2, 6);
+            voiceVolume = builder.comment("Generated Rafael voice volume.").defineInRange("voiceVolume", 1.0, 0.0, 1.0);
+            uiSoundVolume = builder.comment("Activation and typewriter UI sound volume, independent from voice volume.").defineInRange("uiSoundVolume", 0.45, 0.0, 1.0);
+            enableActivationSound = builder.comment("Play a subtle system activation cue when Rafael responds.").define("enableActivationSound", true);
+            enableTypewriterSound = builder.comment("Play restrained UI ticks while text is revealed.").define("enableTypewriterSound", true);
+            showSyntheticVoiceLabel = builder.comment("Show a small SYNTH VOICE indicator while AI-generated speech is active.").define("showSyntheticVoiceLabel", true);
             builder.pop();
         }
     }

@@ -1,11 +1,10 @@
 package com.rafael.server;
 
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import com.rafael.GreatSageMod;
 import com.rafael.command.RafaelCommand;
 import com.rafael.config.GreatSageConfig;
 import com.rafael.network.PacketHandler;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.GameType;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -18,205 +17,35 @@ import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.stream.Collectors;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Mod.EventBusSubscriber(modid = GreatSageMod.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class AIEventManager {
+    private static final Map<UUID, GameType> PLAYER_GAME_MODES = new ConcurrentHashMap<>();
+    private static final Map<String, Long> EVENT_COOLDOWNS = new ConcurrentHashMap<>();
 
-    private static final Map<UUID, GameType> playerGameModes = new HashMap<>();
+    @SubscribeEvent public static void onRegisterCommands(RegisterCommandsEvent event) { RafaelCommand.register(event.getDispatcher()); GreatSageMod.LOGGER.info("Comandos de Rafael (/rafael) registrados."); }
+    @SubscribeEvent public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) { if (!(event.getEntity() instanceof ServerPlayer player)) return; PLAYER_GAME_MODES.put(player.getUUID(), player.gameMode.getGameModeForPlayer()); if (!GreatSageConfig.SERVER.enableAI.get() || !GreatSageConfig.SERVER.announceLogin.get()) return; String text = "Sincronización completada. Usuario " + player.getName().getString() + " reconocido; parámetros del entorno estables."; triggerAIEvent(player, "Conexión de Jugador", text, text, false); }
+    @SubscribeEvent public static void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) { if (event.getEntity() instanceof ServerPlayer player) { PLAYER_GAME_MODES.remove(player.getUUID()); String prefix = player.getUUID() + ":"; EVENT_COOLDOWNS.keySet().removeIf(key -> key.startsWith(prefix)); } }
+    @SubscribeEvent public static void onPlayerDeath(LivingDeathEvent event) { if (!GreatSageConfig.SERVER.enableAI.get() || !GreatSageConfig.SERVER.announcePlayerDeath.get()) return; if (event.getEntity() instanceof ServerPlayer player) { String deathMessage = event.getSource().getLocalizedDeathMessage(player).getString(); String fallback = "Alerta crítica. Baja confirmada. Causa registrada: " + deathMessage + "."; triggerAIEvent(player, "Muerte de Jugador", deathMessage, fallback, true); } }
+    @SubscribeEvent public static void onPlayerTick(TickEvent.PlayerTickEvent event) { if (event.phase != TickEvent.Phase.END || !(event.player instanceof ServerPlayer player)) return; GameType current = player.gameMode.getGameModeForPlayer(); GameType previous = PLAYER_GAME_MODES.put(player.getUUID(), current); if (previous == null || previous == current) return; if (!GreatSageConfig.SERVER.enableAI.get() || !GreatSageConfig.SERVER.announceGamemodeChanges.get()) return; String detail = previous.getName() + " -> " + current.getName(); String fallback = "Parámetros operativos reconfigurados. Modo de juego establecido en " + current.getName() + "."; triggerAIEvent(player, "Cambio de Modo de Juego", detail, fallback, false); }
+    @SubscribeEvent public static void onPlayerClone(PlayerEvent.Clone event) { if (!(event.getEntity() instanceof ServerPlayer player) || !event.isWasDeath()) return; PLAYER_GAME_MODES.put(player.getUUID(), player.gameMode.getGameModeForPlayer()); if (!GreatSageConfig.SERVER.enableAI.get() || !GreatSageConfig.SERVER.announceRespawn.get()) return; String fallback = "Regeneración biológica completada. Conciencia y parámetros vitales restaurados."; triggerAIEvent(player, "Reaparición / Respawn", "Respawn tras muerte", fallback, false); }
+    @SubscribeEvent public static void onLivingHurt(LivingHurtEvent event) { if (!GreatSageConfig.SERVER.enableAI.get() || !GreatSageConfig.SERVER.announceLowHealth.get()) return; if (!(event.getEntity() instanceof ServerPlayer player)) return; float healthBefore = player.getHealth(); float healthAfter = Math.max(0.0f, healthBefore - event.getAmount()); if (healthBefore > 4.0f && healthAfter <= 4.0f && healthAfter > 0.0f) { String detail = String.format(java.util.Locale.ROOT, "Salud estimada tras daño: %.1f/20", healthAfter); String fallback = "Advertencia. Umbral vital crítico detectado: " + String.format(java.util.Locale.ROOT, "%.1f", healthAfter) + " puntos. Retirada o curación inmediata recomendada."; triggerAIEvent(player, "Salud Crítica", detail, fallback, false); } }
+    @SubscribeEvent public static void onItemToss(ItemTossEvent event) { if (!GreatSageConfig.SERVER.enableAI.get() || !GreatSageConfig.SERVER.announceItemDrops.get()) return; if (event.getPlayer() instanceof ServerPlayer player) { String item = event.getEntity().getItem().getHoverName().getString(); String fallback = "Objeto descartado del inventario activo: " + item + "."; triggerAIEvent(player, "Objeto Descartado", item, fallback, false); } }
+    @SubscribeEvent public static void onAdvancement(AdvancementEvent.AdvancementEarnEvent event) { if (!GreatSageConfig.SERVER.enableAI.get() || !GreatSageConfig.SERVER.announceAdvancements.get()) return; if (event.getEntity() instanceof ServerPlayer player) { String advancement = event.getAdvancement().getId().toString(); String fallback = "Nuevo hito registrado: " + event.getAdvancement().getId().getPath().replace('_', ' ') + ". Progreso actualizado."; triggerAIEvent(player, "Logro Obtenido", advancement, fallback, false); } }
 
-    @SubscribeEvent
-    public static void onRegisterCommands(RegisterCommandsEvent event) {
-        RafaelCommand.register(event.getDispatcher());
-        GreatSageMod.LOGGER.info("Comandos de Rafael (/rafael) registrados correctamente.");
+    public static void triggerAIEvent(ServerPlayer player, String eventType, String fallbackText) { triggerAIEvent(player, eventType, fallbackText, fallbackText, "Prueba Manual".equalsIgnoreCase(eventType)); }
+
+    public static void triggerAIEvent(ServerPlayer player, String eventType, String detail, String fallbackText, boolean bypassCooldown) {
+        if (player == null || player.getServer() == null) return;
+        if (!bypassCooldown && !acquireCooldown(player.getUUID(), eventType)) return;
+        MinecraftServer server = player.getServer();
+        UUID playerId = player.getUUID();
+        RafaelService.EventSnapshot snapshot = new RafaelService.EventSnapshot(player.getName().getString(), eventType, detail == null ? "" : detail, fallbackText == null ? "" : fallbackText, player.getHealth(), player.level().dimension().location().toString());
+        RafaelService.requestSpeech(snapshot, result -> server.execute(() -> { ServerPlayer target = server.getPlayerList().getPlayer(playerId); if (target == null) { GreatSageMod.LOGGER.debug("Respuesta de Rafael descartada: el jugador {} ya no está conectado.", snapshot.playerName()); return; } PacketHandler.sendToClient(target, result.text(), result.audioWav(), result.emotion(), result.syntheticVoice()); }));
     }
 
-    @SubscribeEvent
-    public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
-        if (!GreatSageConfig.SERVER.enableAI.get()) return;
-        if (event.getEntity() instanceof ServerPlayer player) {
-            playerGameModes.put(player.getUUID(), player.gameMode.getGameModeForPlayer());
-            String defaultText = "Análisis completado. Usuario " + player.getName().getString() + " sincronizado correctamente en el sistema.";
-            triggerAIEvent(player, "Conexión de Jugador", defaultText);
-        }
-    }
-
-    @SubscribeEvent
-    public static void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
-        if (event.getEntity() instanceof ServerPlayer player) {
-            playerGameModes.remove(player.getUUID());
-        }
-    }
-
-    @SubscribeEvent
-    public static void onPlayerDeath(LivingDeathEvent event) {
-        if (!GreatSageConfig.SERVER.enableAI.get() || !GreatSageConfig.SERVER.announcePlayerDeath.get()) return;
-        if (event.getEntity() instanceof ServerPlayer player) {
-            String deathMsg = event.getSource().getLocalizedDeathMessage(player).getString();
-            String defaultText = "Alerta crítica. El objetivo " + player.getName().getString() + " ha sufrido una baja médica irreversible. Causa: " + deathMsg + ".";
-            triggerAIEvent(player, "Muerte de Jugador", defaultText);
-        }
-    }
-
-    @SubscribeEvent
-    public static void onPlayerTick(TickEvent.PlayerTickEvent event) {
-        if (!GreatSageConfig.SERVER.enableAI.get()) return;
-        if (event.phase == TickEvent.Phase.END && event.player instanceof ServerPlayer player) {
-            GameType currentMode = player.gameMode.getGameModeForPlayer();
-            UUID uuid = player.getUUID();
-            GameType previousMode = playerGameModes.get(uuid);
-
-            if (previousMode == null) {
-                playerGameModes.put(uuid, currentMode);
-            } else if (previousMode != currentMode) {
-                playerGameModes.put(uuid, currentMode);
-                String defaultText = "Información: Cambio de modo de juego detectado a [" + currentMode.name() + "]. Recalibrando parámetros cinemáticos.";
-                GreatSageMod.LOGGER.info("Rafael detectó cambio de gamemode para {}: de {} a {}", player.getName().getString(), previousMode, currentMode);
-                triggerAIEvent(player, "Cambio de Modo de Juego", defaultText);
-            }
-        }
-    }
-
-    @SubscribeEvent
-    public static void onPlayerClone(PlayerEvent.Clone event) {
-        if (!GreatSageConfig.SERVER.enableAI.get()) return;
-        if (event.getEntity() instanceof ServerPlayer player && event.isWasDeath()) {
-            playerGameModes.put(player.getUUID(), player.gameMode.getGameModeForPlayer());
-            String defaultText = "Análisis completado. Regeneración biológica y restauración de consciencia exitosa para " + player.getName().getString() + ".";
-            triggerAIEvent(player, "Reaparición / Respawn", defaultText);
-        }
-    }
-
-    @SubscribeEvent
-    public static void onLivingHurt(LivingHurtEvent event) {
-        if (!GreatSageConfig.SERVER.enableAI.get() || !GreatSageConfig.SERVER.announceLowHealth.get()) return;
-        if (event.getEntity() instanceof ServerPlayer player) {
-            float healthAfter = player.getHealth() - event.getAmount();
-            if (healthAfter <= 4.0f && player.getHealth() > 4.0f) {
-                String defaultText = "Advertencia: Salud crítica detectada (" + String.format("%.1f", healthAfter) + "/20.0). Se recomienda retirada táctica inmediata o consumo de poción.";
-                triggerAIEvent(player, "Salud Crítica", defaultText);
-            }
-        }
-    }
-
-    @SubscribeEvent
-    public static void onItemSelectedOrDropped(ItemTossEvent event) {
-        if (!GreatSageConfig.SERVER.enableAI.get() || !GreatSageConfig.SERVER.announceItemDrops.get()) return;
-        if (event.getPlayer() instanceof ServerPlayer player) {
-            String itemName = event.getEntity().getItem().getHoverName().getString();
-            String defaultText = "Información: Se ha descartado el objeto [" + itemName + "] del inventario activo.";
-            triggerAIEvent(player, "Objeto Droppeado", defaultText);
-        }
-    }
-
-    @SubscribeEvent
-    public static void onAdvancement(AdvancementEvent.AdvancementEarnEvent event) {
-        if (!GreatSageConfig.SERVER.enableAI.get()) return;
-        if (event.getEntity() instanceof ServerPlayer player) {
-            String defaultText = "Notificación: Se ha registrado un nuevo hito / avance en el progreso del usuario. Capacidad analítica expandida.";
-            try {
-                String advName = event.getAdvancement().getId().getPath();
-                defaultText = "Notificación: Hito completado [" + advName.toUpperCase() + "]. Sintonización de skill mejorada.";
-            } catch (Exception ignored) {}
-            triggerAIEvent(player, "Logro Obtenido", defaultText);
-        }
-    }
-
-    public static void triggerAIEvent(ServerPlayer player, String eventType, String defaultFallbackText) {
-        CompletableFuture.runAsync(() -> {
-            String endpointUrl = GreatSageConfig.SERVER.aiEndpointUrl.get();
-            String apiKey = GreatSageConfig.SERVER.apiKey.get();
-            HttpURLConnection conn = null;
-
-            try {
-                URL url = new URL(endpointUrl);
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-                conn.setRequestProperty("Accept", "application/json");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(30000);
-                if (!apiKey.isEmpty()) {
-                    conn.setRequestProperty("Authorization", "Bearer " + apiKey);
-                }
-                conn.setDoOutput(true);
-
-                JsonObject requestJson = new JsonObject();
-                requestJson.addProperty("player", player.getName().getString());
-                requestJson.addProperty("event", eventType);
-                requestJson.addProperty("detail", defaultFallbackText);
-                requestJson.addProperty("health", player.getHealth());
-                requestJson.addProperty("dimension", player.level().dimension().location().toString());
-
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write(requestJson.toString().getBytes(StandardCharsets.UTF_8));
-                }
-
-                int responseCode = conn.getResponseCode();
-                if (responseCode >= 200 && responseCode < 300) {
-                    String responseBody = readBody(conn.getInputStream());
-                    JsonObject responseJson = JsonParser.parseString(responseBody).getAsJsonObject();
-
-                    String text = getString(responseJson, "text", defaultFallbackText);
-                    String audioUrl = getString(responseJson, "audio_url", "");
-                    String emotion = getString(responseJson, "emotion", "analytical");
-                    String audioStatus = getString(responseJson, "audio_status", audioUrl.isEmpty() ? "missing" : "ready");
-                    String audioError = getString(responseJson, "audio_error", "");
-
-                    PacketHandler.sendToClient(player, text, audioUrl, emotion);
-                    GreatSageMod.LOGGER.info(
-                            "IA consultada para '{}': texto={} chars, audioStatus={}, audioUrl={}",
-                            eventType, text.length(), audioStatus, audioUrl.isEmpty() ? "<vacía>" : audioUrl
-                    );
-                    if (audioUrl.isEmpty() && !audioError.isEmpty()) {
-                        GreatSageMod.LOGGER.warn("Backend respondió sin voz para '{}': {}", eventType, audioError);
-                    }
-                } else {
-                    String errorBody = conn.getErrorStream() != null ? readBody(conn.getErrorStream()) : "";
-                    GreatSageMod.LOGGER.warn(
-                            "El servidor de IA respondió HTTP {} para '{}'. Respuesta: {}. Usando fallback local.",
-                            responseCode, eventType, errorBody
-                    );
-                    PacketHandler.sendToClient(player, defaultFallbackText, "", "analytical");
-                }
-            } catch (Exception e) {
-                GreatSageMod.LOGGER.warn(
-                        "Falló la consulta a Rafael en {} para '{}': {}. Usando fallback local.",
-                        endpointUrl, eventType, e.toString(), e
-                );
-                PacketHandler.sendToClient(player, defaultFallbackText, "", "analytical");
-            } finally {
-                if (conn != null) {
-                    conn.disconnect();
-                }
-            }
-        });
-    }
-
-    private static String readBody(InputStream stream) throws Exception {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-            return reader.lines().collect(Collectors.joining("\n"));
-        }
-    }
-
-    private static String getString(JsonObject json, String key, String fallback) {
-        if (json.has(key) && !json.get(key).isJsonNull()) {
-            try {
-                String value = json.get(key).getAsString();
-                return value != null ? value : fallback;
-            } catch (Exception ignored) {}
-        }
-        return fallback;
-    }
+    private static boolean acquireCooldown(UUID playerId, String eventType) { int cooldownSeconds = GreatSageConfig.SERVER.eventCooldownSeconds.get(); String key = playerId + ":" + eventType; long now = System.currentTimeMillis(); Long previous = EVENT_COOLDOWNS.get(key); if (previous != null && now - previous < cooldownSeconds * 1000L) return false; EVENT_COOLDOWNS.put(key, now); return true; }
 }

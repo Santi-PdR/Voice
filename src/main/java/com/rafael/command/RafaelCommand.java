@@ -4,34 +4,39 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.rafael.network.PacketHandler;
 import com.rafael.server.AIEventManager;
+import com.rafael.server.RafaelService;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 
-public class RafaelCommand {
+public final class RafaelCommand {
+    private RafaelCommand() {}
+
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
-        dispatcher.register(
-                Commands.literal("rafael")
-                        .then(Commands.literal("test")
-                                .then(Commands.argument("message", StringArgumentType.greedyString())
-                                        .executes(context -> {
-                                            ServerPlayer player = context.getSource().getPlayerOrException();
-                                            String message = StringArgumentType.getString(context, "message");
-                                            AIEventManager.triggerAIEvent(player, "Prueba Manual", "Análisis manual ejecutado: " + message);
-                                            context.getSource().sendSuccess(() -> Component.literal("§b[Rafael]: §fEvaluando consulta..."), false);
-                                            return 1;
-                                        })
-                                )
-                        )
-                        .then(Commands.literal("status")
-                                .executes(context -> {
-                                    ServerPlayer player = context.getSource().getPlayerOrException();
-                                    PacketHandler.sendToClient(player, "Estado del Sistema: Operativo al 100%. Conexión con Gran Sabio estable.", "", "analytical");
-                                    context.getSource().sendSuccess(() -> Component.literal("§b[Rafael]: §fEstado enviado al HUD."), false);
-                                    return 1;
-                                })
-                        )
-        );
+        dispatcher.register(Commands.literal("rafael")
+                .then(Commands.literal("test").then(Commands.argument("message", StringArgumentType.greedyString()).executes(context -> {
+                    ServerPlayer player = context.getSource().getPlayerOrException();
+                    String message = StringArgumentType.getString(context, "message").trim();
+                    if (message.isEmpty()) { context.getSource().sendFailure(Component.literal("§cEscribe un mensaje para Rafael.")); return 0; }
+                    String fallback = "Consulta recibida. " + message;
+                    AIEventManager.triggerAIEvent(player, "Prueba Manual", message, fallback, true);
+                    context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §7Procesando análisis y voz desde el servidor..."), false);
+                    return 1;
+                })))
+                .then(Commands.literal("voice").executes(context -> {
+                    ServerPlayer player = context.getSource().getPlayerOrException();
+                    String phrase = "Sistema de voz operativo. Sincronización acústica completada.";
+                    AIEventManager.triggerAIEvent(player, "Prueba de Voz", phrase, phrase, true);
+                    context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §7Solicitando prueba de síntesis de voz..."), false);
+                    return 1;
+                }))
+                .then(Commands.literal("status").executes(context -> {
+                    ServerPlayer player = context.getSource().getPlayerOrException();
+                    String status = RafaelService.statusSummary();
+                    PacketHandler.sendToClient(player, status, new byte[0], "sync", false);
+                    context.getSource().sendSuccess(() -> Component.literal("§b[Rafael] §f" + status), false);
+                    return 1;
+                })));
     }
 }

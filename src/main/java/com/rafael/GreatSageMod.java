@@ -17,20 +17,16 @@ public class GreatSageMod {
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     public GreatSageMod() {
-        LOGGER.info("Inicializando Great Sage Voice (Rafael) para Minecraft 1.20.1 (Forge)");
-
-        // Registrar configuraciones
+        LOGGER.info("Inicializando Great Sage Voice / Rafael (Forge 1.20.1, arquitectura server-native)");
         ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, GreatSageConfig.SERVER_SPEC, "great_sage_voice-server.toml");
         ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, GreatSageClientConfig.CLIENT_SPEC, "great_sage_voice-client.toml");
-
-        // Registrar eventos del ciclo de vida
         FMLJavaModLoadingContext.get().getModEventBus().addListener(this::setup);
     }
 
     private void setup(final FMLCommonSetupEvent event) {
         event.enqueueWork(() -> {
             PacketHandler.register();
-            LOGGER.info("Canal de red y paquetes de Rafael registrados correctamente.");
+            LOGGER.info("Canal Rafael v2 registrado: texto + WAV server->client; Python/localhost no requerido.");
         });
     }
 }

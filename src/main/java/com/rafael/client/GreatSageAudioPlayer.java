@@ -13,148 +13,86 @@ import javax.sound.sampled.Clip;
 import javax.sound.sampled.FloatControl;
 import javax.sound.sampled.LineEvent;
 import java.io.BufferedInputStream;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
+import java.io.ByteArrayInputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicReference;
 
-public class GreatSageAudioPlayer {
+public final class GreatSageAudioPlayer {
+    private static final AtomicReference<Clip> CURRENT_VOICE = new AtomicReference<>();
+    private static final ExecutorService VOICE_EXECUTOR = Executors.newSingleThreadExecutor(new ThreadFactory() {
+        @Override public Thread newThread(Runnable runnable) {
+            Thread thread = new Thread(runnable, "Rafael-Client-Audio");
+            thread.setDaemon(true);
+            return thread;
+        }
+    });
 
-    private static final Set<Clip> ACTIVE_CLIPS = ConcurrentHashMap.newKeySet();
+    private GreatSageAudioPlayer() {}
 
-    public static void playVoice(String audioUrl) {
-        Minecraft minecraft = Minecraft.getInstance();
+    public static void playVoice(byte[] wavData) {
+        playActivationCue();
         float volume = (float) GreatSageClientConfig.CLIENT.voiceVolume.get().doubleValue();
-        if (volume <= 0f) return;
-
-        minecraft.execute(() -> {
-            if (minecraft.player != null && minecraft.player.level() != null) {
-                minecraft.player.level().playSound(
-                        minecraft.player,
-                        minecraft.player.blockPosition(),
-                        SoundEvents.ENCHANTMENT_TABLE_USE,
-                        SoundSource.PLAYERS,
-                        0.8f * volume,
-                        1.2f
-                );
-            }
-        });
-
-        if (audioUrl == null || audioUrl.isBlank()) {
-            GreatSageMod.LOGGER.debug("Rafael recibió un paquete sin audio_url; se reproduce solo el efecto local.");
-            return;
-        }
-
-        CompletableFuture.runAsync(() -> streamAndPlay(audioUrl, volume));
+        if (volume <= 0f || wavData == null || wavData.length < 44) return;
+        byte[] immutableAudio = wavData.clone();
+        VOICE_EXECUTOR.execute(() -> decodeAndPlay(immutableAudio, volume));
     }
 
-    private static void streamAndPlay(String audioUrl, float volume) {
-        HttpURLConnection connection = null;
-        try {
-            URL url = new URL(audioUrl);
-            connection = (HttpURLConnection) url.openConnection();
-            connection.setRequestMethod("GET");
-            connection.setRequestProperty("Accept", "audio/wav,audio/x-wav,application/octet-stream;q=0.8,*/*;q=0.1");
-            connection.setConnectTimeout(5000);
-            connection.setReadTimeout(15000);
-
-            int responseCode = connection.getResponseCode();
-            if (responseCode < 200 || responseCode >= 300) {
-                throw new IllegalStateException("HTTP " + responseCode + " al descargar la voz");
-            }
-
-            try (InputStream inputStream = connection.getInputStream();
-                 BufferedInputStream bufferedInputStream = new BufferedInputStream(inputStream);
-                 AudioInputStream sourceStream = AudioSystem.getAudioInputStream(bufferedInputStream)) {
-
-                AudioFormat sourceFormat = sourceStream.getFormat();
-                AudioInputStream playableStream = sourceStream;
-                AudioFormat targetFormat = new AudioFormat(
-                        AudioFormat.Encoding.PCM_SIGNED,
-                        sourceFormat.getSampleRate(),
-                        16,
-                        sourceFormat.getChannels(),
-                        sourceFormat.getChannels() * 2,
-                        sourceFormat.getSampleRate(),
-                        false
-                );
-
-                if (!isClipFriendly(sourceFormat) && AudioSystem.isConversionSupported(targetFormat, sourceFormat)) {
-                    playableStream = AudioSystem.getAudioInputStream(targetFormat, sourceStream);
-                    GreatSageMod.LOGGER.info("Convirtiendo audio de Rafael en cliente: {} -> {}", sourceFormat, targetFormat);
+    private static void decodeAndPlay(byte[] wavData, float volume) {
+        stopCurrentVoice();
+        try (ByteArrayInputStream byteStream = new ByteArrayInputStream(wavData);
+             BufferedInputStream buffered = new BufferedInputStream(byteStream);
+             AudioInputStream sourceStream = AudioSystem.getAudioInputStream(buffered)) {
+            AudioFormat sourceFormat = sourceStream.getFormat();
+            AudioInputStream playableStream = sourceStream;
+            AudioFormat targetFormat = new AudioFormat(AudioFormat.Encoding.PCM_SIGNED, sourceFormat.getSampleRate(), 16, Math.max(1, sourceFormat.getChannels()), Math.max(1, sourceFormat.getChannels()) * 2, sourceFormat.getSampleRate(), false);
+            if (!isClipFriendly(sourceFormat) && AudioSystem.isConversionSupported(targetFormat, sourceFormat)) playableStream = AudioSystem.getAudioInputStream(targetFormat, sourceStream);
+            Clip clip = AudioSystem.getClip();
+            clip.open(playableStream);
+            configureVolume(clip, volume);
+            CURRENT_VOICE.set(clip);
+            clip.addLineListener(event -> {
+                if (event.getType() == LineEvent.Type.STOP || event.getType() == LineEvent.Type.CLOSE) {
+                    CURRENT_VOICE.compareAndSet(clip, null);
+                    if (clip.isOpen()) clip.close();
                 }
-
-                Clip clip = AudioSystem.getClip();
-                clip.open(playableStream);
-                configureVolume(clip, volume);
-
-                ACTIVE_CLIPS.add(clip);
-                clip.addLineListener(event -> {
-                    if (event.getType() == LineEvent.Type.STOP || event.getType() == LineEvent.Type.CLOSE) {
-                        ACTIVE_CLIPS.remove(clip);
-                        if (clip.isOpen()) {
-                            clip.close();
-                        }
-                    }
-                });
-
-                clip.start();
-                GreatSageMod.LOGGER.info(
-                        "Reproduciendo voz de Rafael: url={}, formato={}, frames={}, duración≈{} ms",
-                        audioUrl,
-                        clip.getFormat(),
-                        clip.getFrameLength(),
-                        clip.getMicrosecondLength() / 1000L
-                );
-            }
+            });
+            clip.start();
+            GreatSageMod.LOGGER.info("Voz sintética de Rafael iniciada: {} Hz, {} bit, {} canal(es), ~{} ms", clip.getFormat().getSampleRate(), clip.getFormat().getSampleSizeInBits(), clip.getFormat().getChannels(), clip.getMicrosecondLength() / 1000L);
         } catch (Exception e) {
-            GreatSageMod.LOGGER.warn(
-                    "No se pudo reproducir la voz de Rafael desde '{}': {}",
-                    audioUrl,
-                    e.toString(),
-                    e
-            );
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
+            GreatSageMod.LOGGER.warn("No se pudo reproducir el WAV recibido de Rafael: {}", e.toString(), e);
         }
     }
 
-    private static boolean isClipFriendly(AudioFormat format) {
-        return AudioFormat.Encoding.PCM_SIGNED.equals(format.getEncoding())
-                && format.getSampleSizeInBits() == 16
-                && !format.isBigEndian();
-    }
-
+    private static boolean isClipFriendly(AudioFormat format) { return AudioFormat.Encoding.PCM_SIGNED.equals(format.getEncoding()) && format.getSampleSizeInBits() == 16 && !format.isBigEndian(); }
     private static void configureVolume(Clip clip, float volume) {
         try {
-            FloatControl gainControl = (FloatControl) clip.getControl(FloatControl.Type.MASTER_GAIN);
-            float dB = (float) (20.0 * Math.log10(Math.max(0.0001, volume)));
-            gainControl.setValue(Math.max(gainControl.getMinimum(), Math.min(gainControl.getMaximum(), dB)));
-        } catch (Exception e) {
-            GreatSageMod.LOGGER.debug("El mixer de Java no expone MASTER_GAIN; se usará el volumen nativo del clip.");
-        }
+            FloatControl gain = (FloatControl) clip.getControl(FloatControl.Type.MASTER_GAIN);
+            float dB = (float) (20.0 * Math.log10(Math.max(0.0001f, volume)));
+            gain.setValue(Math.max(gain.getMinimum(), Math.min(gain.getMaximum(), dB)));
+        } catch (Exception ignored) { GreatSageMod.LOGGER.debug("El mixer del sistema no expone MASTER_GAIN para la voz de Rafael."); }
     }
-
-    public static void playTypewriterTick() {
+    private static void stopCurrentVoice() {
+        Clip old = CURRENT_VOICE.getAndSet(null);
+        if (old != null) { try { old.stop(); } catch (Exception ignored) {} try { old.close(); } catch (Exception ignored) {} }
+    }
+    private static void playActivationCue() {
+        if (!GreatSageClientConfig.CLIENT.enableActivationSound.get()) return;
         Minecraft minecraft = Minecraft.getInstance();
-        float volume = (float) GreatSageClientConfig.CLIENT.voiceVolume.get().doubleValue();
+        float volume = (float) GreatSageClientConfig.CLIENT.uiSoundVolume.get().doubleValue();
         if (volume <= 0f) return;
-
         minecraft.execute(() -> {
-            if (minecraft.player != null && minecraft.player.level() != null) {
-                minecraft.player.level().playSound(
-                        minecraft.player,
-                        minecraft.player.blockPosition(),
-                        SoundEvents.NOTE_BLOCK_PLING.get(),
-                        SoundSource.PLAYERS,
-                        0.15f * volume,
-                        2.0f
-                );
-            }
+            if (minecraft.player != null && minecraft.player.level() != null) minecraft.player.level().playSound(minecraft.player, minecraft.player.blockPosition(), SoundEvents.ENCHANTMENT_TABLE_USE, SoundSource.PLAYERS, 0.55f * volume, 1.35f);
+        });
+    }
+    public static void playTypewriterTick() {
+        if (!GreatSageClientConfig.CLIENT.enableTypewriterSound.get()) return;
+        Minecraft minecraft = Minecraft.getInstance();
+        float volume = (float) GreatSageClientConfig.CLIENT.uiSoundVolume.get().doubleValue();
+        if (volume <= 0f) return;
+        minecraft.execute(() -> {
+            if (minecraft.player != null && minecraft.player.level() != null) minecraft.player.level().playSound(minecraft.player, minecraft.player.blockPosition(), SoundEvents.NOTE_BLOCK_PLING.get(), SoundSource.PLAYERS, 0.08f * volume, 1.95f);
         });
     }
 }
