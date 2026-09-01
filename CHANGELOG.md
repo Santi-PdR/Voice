@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.5.0 - Character-first Great Sage voice calibration
+
+### Character reference correction
+
+- Changed the target from the actors' normal interview/demo speech to their **in-character Great Sage / Raphael performance**.
+- Added local WAV/MP3 reference support so deployment can prepare video-derived character audio once and the mod consumes a deterministic local file afterwards.
+- Local reference paths are sandboxed inside `great_sage_voice/authorized_voice/`.
+- Local-reference modification times now invalidate cached target embeddings automatically.
+- Source manifests can label references as `character` or `identity`; deployment uses repeated character segments so the current OpenVoice average is dominated by the actual character performance rather than interviews.
+- Fixed the deployment strategy that previously assumed YouTube could provide MP3 directly. YouTube character material is now converted to mono WAV before Minecraft starts.
+
+### Great Sage delivery
+
+- Increased authorized tone-transfer strength from 0.96 to 1.08.
+- Reduced Piper generator randomness from 0.42 to 0.30.
+- Reduced phoneme-width randomness from 0.48 to 0.35.
+- Slowed the ES/EN base cadence slightly to better match Raphael's measured system-report delivery.
+- Shortened default response length to preserve the concise Great Sage cadence.
+- Updated optional promptable-provider direction to explicitly target controlled pitch, precise diction, measured pauses and non-conversational delivery.
+
+### Operations
+
+- Version bumped to 1.5.0.
+- Character-reference download/conversion remains a one-time deployment/bootstrap operation; no persistent audio service is introduced.
+- Existing OpenVoice/ONNX failure fallback remains intact: if character conversion fails, HUD/text and Piper speech continue.
+
 ## 1.4.0 - Automatic authorized Raphael tone cloning
 
 ### Voice identity
@@ -17,7 +43,7 @@
 - Added local authorized source manifest support for direct WAV/MP3 references.
 - Added pinned automatic yt-dlp acquisition for media references on Windows x64/Linux x64.
 - yt-dlp is invoked only during reference acquisition and exits; no persistent service is created.
-- Added JLayer MP3 decoding in-process; no FFmpeg service or manual conversion is required.
+- Added JLayer MP3 decoding in-process.
 - Added reference resampling, mono conversion, segmentation and multi-sample embedding averaging.
 
 ### Local inference
@@ -31,10 +57,9 @@
 ### Packaging and operations
 
 - Bundled ONNX Runtime 1.24.3 and JLayer 1.0.1 with Forge Jar-in-Jar.
-- `jar` now produces a `-slim` diagnostic artifact while `jarJar` produces the distributable JAR.
+- `jar` produces a `-slim` diagnostic artifact while `jarJar` produces the distributable JAR.
 - CI uploads only the distributable bundled artifact.
-- `/rafael status` now reports base TTS and authorized tone-transfer state separately.
-- Version bumped to 1.4.0.
+- `/rafael status` reports base TTS and authorized tone-transfer state separately.
 
 ## 1.3.0 - Bilingual Great Sage identity pass
 

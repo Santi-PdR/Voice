@@ -26,9 +26,8 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Reads an operator-local authorization marker/source manifest and acquires voice
- * references automatically. Actor/source URLs are intentionally not shipped in
- * the public repository; the local deploy bootstrap writes them only for an
- * authorized installation.
+ * references automatically. v1.5 understands both identity references and
+ * character-performance references. Actor/source URLs remain installation-local.
  */
 public final class AuthorizedVoiceReferenceManager {
     private static final String YTDLP_VERSION = "2026.08.19";
@@ -48,7 +47,18 @@ public final class AuthorizedVoiceReferenceManager {
     public static long manifestStamp() {
         try {
             Path manifest = root().resolve("sources.json");
-            return Files.isRegularFile(manifest) ? Files.getLastModifiedTime(manifest).toMillis() : 0L;
+            long stamp = Files.isRegularFile(manifest) ? Files.getLastModifiedTime(manifest).toMillis() : 0L;
+            Path local = root().resolve("local");
+            if (Files.isDirectory(local)) {
+                try (var stream = Files.walk(local)) {
+                    long newest = stream.filter(Files::isRegularFile).mapToLong(path -> {
+                        try { return Files.getLastModifiedTime(path).toMillis(); }
+                        catch (Exception ignored) { return 0L; }
+                    }).max().orElse(0L);
+                    stamp = Math.max(stamp, newest);
+                }
+            }
+            return stamp;
         } catch (Exception ignored) {
             return 0L;
         }
@@ -57,15 +67,11 @@ public final class AuthorizedVoiceReferenceManager {
     public static List<ReferenceSample> prepare(String language) throws Exception {
         String lang = RafaelLanguageManager.normalize(language);
         synchronized (LOCK) {
-            if (!isAuthorizedLocally()) {
-                throw new IOException("Authorized voice source manifest is not installed locally.");
-            }
+            if (!isAuthorizedLocally()) throw new IOException("Authorized voice source manifest is not installed locally.");
 
             JsonObject manifest = JsonParser.parseString(Files.readString(root().resolve("sources.json"), StandardCharsets.UTF_8)).getAsJsonObject();
             String key = RafaelLanguageManager.isSpanish(lang) ? "spanish" : "english";
-            if (!manifest.has(key) || !manifest.get(key).isJsonArray()) {
-                throw new IOException("No authorized references configured for " + key + ".");
-            }
+            if (!manifest.has(key) || !manifest.get(key).isJsonArray()) throw new IOException("No authorized references configured for " + key + ".");
 
             Path referenceDir = root().resolve("references").resolve(lang);
             Files.createDirectories(referenceDir);
@@ -79,44 +85,67 @@ public final class AuthorizedVoiceReferenceManager {
                 JsonObject source = element.getAsJsonObject();
                 try {
                     String type = string(source, "type", "direct").trim().toLowerCase(Locale.ROOT);
-                    String url = string(source, "url", "").trim();
-                    if (url.isBlank()) continue;
-                    validateHttps(url);
-                    double skip = number(source, "skipSeconds", 0.5);
-                    double duration = number(source, "durationSeconds", 20.0);
+                    String role = string(source, "role", "identity").trim().toLowerCase(Locale.ROOT);
+                    if (!role.equals("character")) role = "identity";
+                    double weight = Math.max(0.05, Math.min(12.0, number(source, "weight", role.equals("character") ? 4.0 : 1.0)));
+                    boolean scan = bool(source, "scan", false);
+                    double skip = Math.max(0.0, number(source, "skipSeconds", 0.5));
+                    double duration = Math.max(3.0, Math.min(30.0, number(source, "durationSeconds", 18.0)));
+                    double scanStart = Math.max(0.0, number(source, "scanStartSeconds", skip));
+                    double scanDuration = Math.max(0.0, Math.min(1800.0, number(source, "scanDurationSeconds", 0.0)));
 
                     Path file;
                     String format;
-                    if ("soundcloud_mp3".equals(type) || "media_mp3".equals(type)) {
-                        file = referenceDir.resolve("reference-" + i + ".mp3");
-                        format = "mp3";
-                        if (!validFile(file, MIN_REFERENCE_BYTES)) downloadMp3WithYtDlp(url, file);
+                    if (type.equals("local") || type.equals("local_wav") || type.equals("local_mp3")) {
+                        String localPath = string(source, "path", "").trim();
+                        if (localPath.isBlank()) throw new IOException("Local reference has no path.");
+                        file = resolveLocal(localPath);
+                        format = type.endsWith("mp3") ? "mp3" : extensionFromPath(file);
+                        if (!format.equals("wav") && !format.equals("mp3")) throw new IOException("Unsupported local reference format: " + format);
+                        if (!validFile(file, MIN_REFERENCE_BYTES)) throw new IOException("Local authorized reference is missing or too small: " + localPath);
                     } else {
-                        String extension = extensionFromUrl(url);
-                        if (!extension.equals("wav") && !extension.equals("mp3")) extension = string(source, "format", "wav").toLowerCase(Locale.ROOT);
-                        if (!extension.equals("wav") && !extension.equals("mp3")) throw new IOException("Unsupported direct reference format: " + extension);
-                        file = referenceDir.resolve("reference-" + i + "." + extension);
-                        format = extension;
-                        if (!validFile(file, MIN_REFERENCE_BYTES)) downloadDirect(url, file, MIN_REFERENCE_BYTES);
+                        String url = string(source, "url", "").trim();
+                        if (url.isBlank()) continue;
+                        validateHttps(url);
+                        if ("soundcloud_mp3".equals(type) || "media_mp3".equals(type)) {
+                            file = referenceDir.resolve("reference-" + i + ".mp3");
+                            format = "mp3";
+                            if (!validFile(file, MIN_REFERENCE_BYTES)) downloadMp3WithYtDlp(url, file);
+                        } else {
+                            String extension = extensionFromUrl(url);
+                            if (!extension.equals("wav") && !extension.equals("mp3")) extension = string(source, "format", "wav").toLowerCase(Locale.ROOT);
+                            if (!extension.equals("wav") && !extension.equals("mp3")) throw new IOException("Unsupported direct reference format: " + extension);
+                            file = referenceDir.resolve("reference-" + i + "." + extension);
+                            format = extension;
+                            if (!validFile(file, MIN_REFERENCE_BYTES)) downloadDirect(url, file, MIN_REFERENCE_BYTES);
+                        }
                     }
-                    if (validFile(file, MIN_REFERENCE_BYTES)) {
-                        samples.add(new ReferenceSample(file, format, Math.max(0.0, skip), Math.max(4.0, Math.min(30.0, duration))));
-                    }
+
+                    samples.add(new ReferenceSample(file, format, skip, duration, role, weight, scan, scanStart, scanDuration));
                 } catch (Exception e) {
                     errors.add("#" + i + " " + e.getMessage());
                     GreatSageMod.LOGGER.warn("Authorized voice reference {} could not be prepared: {}", i, e.toString());
                 }
             }
 
-            if (samples.isEmpty()) {
-                throw new IOException("No authorized reference could be acquired" + (errors.isEmpty() ? "." : ": " + String.join(" | ", errors)));
-            }
+            if (samples.isEmpty()) throw new IOException("No authorized reference could be acquired" + (errors.isEmpty() ? "." : ": " + String.join(" | ", errors)));
+            long characterCount = samples.stream().filter(sample -> sample.role().equals("character")).count();
+            GreatSageMod.LOGGER.info("Prepared {} authorized {} references ({} character-performance).", samples.size(), key, characterCount);
             return samples;
         }
     }
 
     public static Path root() {
         return FMLPaths.GAMEDIR.get().resolve("great_sage_voice").resolve("authorized_voice");
+    }
+
+    private static Path resolveLocal(String relative) throws IOException {
+        Path authRoot = root().toAbsolutePath().normalize();
+        Path path = Path.of(relative);
+        if (!path.isAbsolute()) path = authRoot.resolve(path);
+        path = path.toAbsolutePath().normalize();
+        if (!path.startsWith(authRoot)) throw new IOException("Local voice reference must stay inside authorized_voice directory.");
+        return path;
     }
 
     private static void downloadMp3WithYtDlp(String mediaUrl, Path target) throws Exception {
@@ -152,7 +181,7 @@ public final class AuthorizedVoiceReferenceManager {
         }
         if (process.exitValue() != 0) {
             cleanupDownloadParts(target);
-            throw new IOException("yt-dlp could not acquire the authorized reference (exit " + process.exitValue() + ").");
+            throw new IOException("yt-dlp could not acquire an MP3 reference (exit " + process.exitValue() + "). Use a local WAV reference for YouTube/video sources.");
         }
 
         Path downloaded = findDownloadedPart(target);
@@ -187,13 +216,9 @@ public final class AuthorizedVoiceReferenceManager {
     private static YtDlpAsset ytDlpAsset() throws IOException {
         String os = osName();
         String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
-        if ("windows".equals(os) && isX64(arch)) {
-            return new YtDlpAsset("yt-dlp.exe", "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a");
-        }
-        if ("linux".equals(os) && isX64(arch)) {
-            return new YtDlpAsset("yt-dlp_linux", "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a");
-        }
-        throw new IOException("Automatic MP3 reference acquisition is currently supported on Windows x64 and Linux x64; platform=" + os + "/" + arch);
+        if ("windows".equals(os) && isX64(arch)) return new YtDlpAsset("yt-dlp.exe", "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a");
+        if ("linux".equals(os) && isX64(arch)) return new YtDlpAsset("yt-dlp_linux", "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a");
+        throw new IOException("Automatic MP3 reference acquisition is supported on Windows x64 and Linux x64; platform=" + os + "/" + arch);
     }
 
     private static Path findDownloadedPart(Path target) throws IOException {
@@ -223,7 +248,7 @@ public final class AuthorizedVoiceReferenceManager {
         connection.setInstanceFollowRedirects(true);
         connection.setConnectTimeout(15_000);
         connection.setReadTimeout(60_000);
-        connection.setRequestProperty("User-Agent", "GreatSageVoice/1.4.0");
+        connection.setRequestProperty("User-Agent", "GreatSageVoice/1.5.0");
         int code = connection.getResponseCode();
         if (code < 200 || code >= 300) {
             connection.disconnect();
@@ -260,12 +285,14 @@ public final class AuthorizedVoiceReferenceManager {
     }
 
     private static String extensionFromUrl(String raw) {
-        try {
-            String path = new URL(raw).getPath().toLowerCase(Locale.ROOT);
-            int dot = path.lastIndexOf('.');
-            if (dot >= 0 && dot + 1 < path.length()) return path.substring(dot + 1);
-        } catch (Exception ignored) {}
-        return "";
+        try { return extensionFromPath(Path.of(new URL(raw).getPath())); }
+        catch (Exception ignored) { return ""; }
+    }
+
+    private static String extensionFromPath(Path path) {
+        String name = path.getFileName() == null ? "" : path.getFileName().toString().toLowerCase(Locale.ROOT);
+        int dot = name.lastIndexOf('.');
+        return dot >= 0 && dot + 1 < name.length() ? name.substring(dot + 1) : "";
     }
 
     private static String string(JsonObject object, String name, String fallback) {
@@ -275,6 +302,11 @@ public final class AuthorizedVoiceReferenceManager {
 
     private static double number(JsonObject object, String name, double fallback) {
         try { return object.has(name) ? object.get(name).getAsDouble() : fallback; }
+        catch (Exception ignored) { return fallback; }
+    }
+
+    private static boolean bool(JsonObject object, String name, boolean fallback) {
+        try { return object.has(name) ? object.get(name).getAsBoolean() : fallback; }
         catch (Exception ignored) { return fallback; }
     }
 
@@ -311,6 +343,16 @@ public final class AuthorizedVoiceReferenceManager {
         return arch.contains("amd64") || arch.contains("x86_64") || arch.contains("x64");
     }
 
-    public record ReferenceSample(Path path, String format, double skipSeconds, double durationSeconds) {}
+    public record ReferenceSample(
+            Path path,
+            String format,
+            double skipSeconds,
+            double durationSeconds,
+            String role,
+            double weight,
+            boolean scan,
+            double scanStartSeconds,
+            double scanDurationSeconds) {}
+
     private record YtDlpAsset(String fileName, String sha256) {}
 }
