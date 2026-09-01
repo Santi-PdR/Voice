@@ -1,6 +1,7 @@
 package com.rafael.client;
 
 import com.rafael.GreatSageMod;
+import com.rafael.config.GreatSageClientConfig;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import net.minecraftforge.api.distmarker.Dist;
@@ -14,19 +15,13 @@ public class GreatSageClient {
     public static void handleRafaelSpeech(String text, String audioUrl, String emotion) {
         GreatSageMod.LOGGER.info("[Rafael / Gran Sabio]: {}", text);
 
-        // Actualizar HUD visual animado con núcleo luminoso, anillos rúnicos y partículas
+        // Actualizar HUD visual animado (Núcleo luminoso a la derecha y chat personalizado compacto)
         GreatSageHudOverlay.updateText(text);
 
         // Reproducir la voz de Rafael (y efectos arcanos de sistema)
         GreatSageAudioPlayer.playVoice(audioUrl);
 
-        // Mostrar en el chat del juego
-        Minecraft minecraft = Minecraft.getInstance();
-        minecraft.execute(() -> {
-            if (minecraft.player != null) {
-                minecraft.player.sendSystemMessage(Component.literal("§b[Gran Sabio (Rafael)]: §f" + text));
-            }
-        });
+        // NOTA: Eliminado el mensaje duplicado en el chat normal de Minecraft para mantener la limpieza.
     }
 
     @SubscribeEvent
